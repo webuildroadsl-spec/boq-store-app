@@ -16,4 +16,22 @@ urlpatterns = [
         views.bill_items_save,
         name="bill_items_save",
     ),
+    path("projects/<int:project_pk>/boq/export/xlsx/", views.export_xlsx, name="export_xlsx"),
+    path("projects/<int:project_pk>/boq/export/pdf/", views.export_pdf, name="export_pdf"),
+    path(
+        "projects/<int:project_pk>/boq/import/template/",
+        views.import_template,
+        name="import_template",
+    ),
+    path("projects/<int:project_pk>/boq/import/", views.import_upload, name="import_upload"),
+    path(
+        "projects/<int:project_pk>/boq/import/preview/",
+        views.import_preview,
+        name="import_preview",
+    ),
+    path(
+        "projects/<int:project_pk>/boq/import/confirm/",
+        views.import_confirm,
+        name="import_confirm",
+    ),
 ]

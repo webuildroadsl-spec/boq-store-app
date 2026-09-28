@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+
+{% block title %}Import BOQ — {{ project.code }}{% endblock %}
+
+{% block content %}
+<p><a href="{% url 'boq:boq_detail' project.pk %}">&larr; BOQ — {{ project.code }}</a></p>
+<h1>Import BOQ from Excel — {{ project.code }}</h1>
+
+<p>
+    The file needs one row per item, with the bill number and title
+    repeated on every row of that bill (a heading row leaves quantity
+    and rate blank; a lump sum row sets unit to "sum" and puts the
+    figure in rate).
+    <a href="{% url 'boq:import_template' project.pk %}">Download the template</a>
+    to see the exact layout, including examples of each.
+</p>
+
+{% if error %}
+<p><strong>{{ error }}</strong></p>
+{% endif %}
+
+<form method="post" enctype="multipart/form-data">
+    {% csrf_token %}
+    <input type="file" name="boq_file" accept=".xlsx" required>
+    <button type="submit">Upload and preview</button>
+</form>
+{% endblock %}

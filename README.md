@@ -4,7 +4,7 @@ Django + PostgreSQL backend for the BOQ and Store modules described in
 [`docs/requirements.md`](docs/requirements.md). This repo is being built
 one step at a time from Section 8 of that spec.
 
-**Current status: Step 3 of 10** — BOQ, bills, items; manual entry grid.
+**Current status: Step 4 of 10** — BOQ Excel import and export.
 
 ## Setup (local development)
 
@@ -56,7 +56,9 @@ python manage.py test
   `core.permissions` helpers everything else should filter through.
 - `boq/` — BOQ, Bill, BOQItem models; `bill_items_save` (the JSON API
   the grid saves to) and its per-role access rules;
-  `static/boq/grid.js` (the manual entry grid's front end).
+  `static/boq/grid.js` (the manual entry grid's front end);
+  `importer.py` (Excel import parsing/validation) and `exporter.py`
+  (Excel/PDF export, and the import template download).
 - `templates/` — project-wide templates (`base.html`,
   `registration/login.html`).
 - `docs/requirements.md` — the full requirements spec this build follows.
@@ -115,8 +117,77 @@ that's worth doing; it hasn't been.
 
 What's *not* built yet, on purpose (later steps per Section 8): BOQ
 versions/approval/variation orders and "only one Approved version"
-(step 5), Excel import/export (step 4), the full bill summary with
-contingency/VAT (step 7's reporting), and material allowances (step 9).
+(step 5), the full bill summary with contingency/VAT (step 7's
+reporting), and material allowances (step 9).
+
+## BOQ Excel import and export (step 4)
+
+`/projects/<id>/boq/` now also links to:
+
+- **Download the import template** — a blank `.xlsx` with the header
+  row the importer expects, plus a few example rows (a heading, a
+  measured item, a lump sum).
+- **Import a BOQ from Excel** — upload → preview → confirm. Nothing is
+  saved until you confirm, and confirming re-validates every row
+  server-side one more time; if even one row still has an error, the
+  whole import is refused (no partial import).
+- **Download as Excel / as PDF** — the current BOQ, in the "bill
+  totals plus a summary page" layout the spec asks for. These are
+  read-only (`can_view_boq`, not `can_edit_boq`) — anyone who can see
+  the BOQ can export it.
+
+Scope decisions made with the user before building this, because real
+BOQ Excel layouts vary a lot and the spec itself flags this as an open
+question:
+
+- **Flat layout only.** One row per item, with the bill number and
+  title repeated on every row of that bill (matching the downloadable
+  template) — not a sheet with merged bill-header rows. A contractor
+  whose existing BOQs use a different layout would need to re-shape
+  them into this one first (or ask for that layout to be supported
+  later).
+- **Item type is inferred, not a mapped column.** A row with no
+  quantity and no rate is a Heading; a row whose unit is "sum" is a
+  Lump Sum (quantity forced to 1, matching rule 2); everything else is
+  Measured. Provisional Sum / Prime Cost / Daywork rows import as one
+  of those two and can be reclassified afterward in the manual-entry
+  grid — there's no way to tell them apart from a spreadsheet cell
+  alone without an explicit column for it.
+- Column headers are matched by name (case/spacing-insensitive, a
+  short alias list — "Qty" and "Quantity" both work), with the mapping
+  shown and editable on the preview screen for a file whose headers
+  don't match at all.
+- Bill number/title only need to appear once per bill in the file
+  (the row where that bill first appears) — every subsequent row for
+  that bill can leave the title blank, matching how a real spreadsheet
+  is usually filled in.
+
+**Tested:** `boq/test_importer.py` unit-tests `auto_detect_mapping` and
+`parse_rows` directly (headings, lump sum inference, duplicate
+references — both within the file and against the existing BOQ,
+unknown units/sections, missing required fields) plus the literal
+acceptance test — a 500-row workbook across 10 bills is built with
+openpyxl in the test itself, its expected bill/grand totals are
+computed independently using the same rounding rule the model uses,
+and the imported BOQ's totals are asserted to match to the cent.
+`boq/test_import_views.py` drives the same thing through the Django
+test client as a browser would (real multipart file upload,
+upload → preview → confirm, permission checks on every step and on
+both export endpoints). It's also been exercised manually end-to-end
+against the running dev server with curl: a real 500-line, 10-bill
+workbook uploaded, previewed, confirmed, and the resulting
+`BOQ.grand_total` (2,270,719.90) checked against the same figure
+computed independently outside the app — then the Excel and PDF
+exports and the template download were downloaded and opened to
+confirm they're genuine, readable files.
+
+**Not built** (deliberately, per Section 8): re-importing into a BOQ
+that already has items only adds new ones (rule 3's uniqueness check
+rejects a duplicate reference rather than updating it) — there's no
+"replace" or "merge" import yet. WeasyPrint needs system-level Pango/
+cairo libraries; they're present in this sandbox already, but the
+production server will need them installed too (see WeasyPrint's own
+install docs for the target OS).
 
 ## How project access is scoped (step 2)
 

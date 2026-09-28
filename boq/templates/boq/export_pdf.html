@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>BOQ — {{ boq.project.code }}</title>
+<style>
+    body { font-family: sans-serif; font-size: 10pt; }
+    h1 { font-size: 14pt; }
+    h2 { font-size: 12pt; margin-top: 1.5em; }
+    table { width: 100%; border-collapse: collapse; margin-bottom: 0.5em; }
+    th, td { border: 1px solid #999; padding: 4px; text-align: left; }
+    td.amount, th.amount { text-align: right; }
+    tr.heading td { font-style: italic; font-weight: bold; }
+    tr.subtotal td { font-weight: bold; }
+    tr.grand-total td { font-weight: bold; border-top: 2px solid #000; }
+</style>
+</head>
+<body>
+<h1>Bill of Quantities — {{ boq.project.code }} (v{{ boq.version_number }}, {{ boq.get_status_display }})</h1>
+
+{% for bill in bills %}
+<h2>Bill {{ bill.number }}: {{ bill.title }}</h2>
+<table>
+    <thead>
+        <tr>
+            <th>Item ref</th>
+            <th>Description</th>
+            <th>Unit</th>
+            <th class="amount">Quantity</th>
+            <th class="amount">Rate</th>
+            <th class="amount">Amount</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for item in bill.items.all %}
+        <tr {% if item.item_type == "heading" %}class="heading"{% endif %}>
+            <td>{{ item.item_reference }}</td>
+            <td>{{ item.description }}</td>
+            <td>{% if item.unit %}{{ item.unit.code }}{% endif %}</td>
+            <td class="amount">{% if item.quantity is not None %}{{ item.quantity }}{% endif %}</td>
+            <td class="amount">{% if item.rate is not None %}{{ item.rate }}{% endif %}</td>
+            <td class="amount">{% if item.amount is not None %}{{ item.amount }}{% endif %}</td>
+        </tr>
+        {% endfor %}
+        <tr class="subtotal">
+            <td colspan="5">Bill {{ bill.number }} total</td>
+            <td class="amount">{{ bill.total }}</td>
+        </tr>
+    </tbody>
+</table>
+{% endfor %}
+
+<h2>Summary</h2>
+<table>
+    <thead>
+        <tr><th>Bill</th><th>Title</th><th class="amount">Total</th></tr>
+    </thead>
+    <tbody>
+        {% for bill in bills %}
+        <tr>
+            <td>{{ bill.number }}</td>
+            <td>{{ bill.title }}</td>
+            <td class="amount">{{ bill.total }}</td>
+        </tr>
+        {% endfor %}
+        <tr class="grand-total">
+            <td colspan="2">Grand total</td>
+            <td class="amount">{{ boq.grand_total }}</td>
+        </tr>
+    </tbody>
+</table>
+</body>
+</html>

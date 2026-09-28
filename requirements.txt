@@ -1,5 +1,15 @@
 asgiref==3.12.1
+cffi==2.1.1
+cssselect2==0.10.1
 Django==5.2.17
+fonttools==4.66.0
+openpyxl==3.1.5
+pillow==12.3.0
 psycopg2-binary==2.9.13
+pycparser==3.0
+pydyf==0.12.1
+pyphen==0.18.1
 python-decouple==3.8
 sqlparse==0.6.0
+tinycss2==1.5.1
+weasyprint==70.0

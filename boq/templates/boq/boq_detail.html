@@ -41,4 +41,20 @@
     <button type="submit">Add bill</button>
 </form>
 {% endif %}
+
+<h2>Export</h2>
+<p>
+    <a href="{% url 'boq:export_xlsx' project.pk %}">Download as Excel (.xlsx)</a>
+    &nbsp;|&nbsp;
+    <a href="{% url 'boq:export_pdf' project.pk %}">Download as PDF</a>
+</p>
+
+{% if can_edit and boq.is_editable %}
+<h2>Import from Excel</h2>
+<p>
+    <a href="{% url 'boq:import_template' project.pk %}">Download the import template</a>
+    &nbsp;|&nbsp;
+    <a href="{% url 'boq:import_upload' project.pk %}">Import a BOQ from Excel</a>
+</p>
+{% endif %}
 {% endblock %}

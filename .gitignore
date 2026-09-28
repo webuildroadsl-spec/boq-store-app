@@ -8,3 +8,4 @@ staticfiles/
 media/
 .DS_Store
 *.log
+boq/import_tmp/

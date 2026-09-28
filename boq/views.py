@@ -1,8 +1,13 @@
 import json
+import os
+import uuid
+from decimal import Decimal
 
+from django.conf import settings
+from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied
-from django.http import Http404, JsonResponse
+from django.http import Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.views.decorators.http import require_GET, require_POST
@@ -11,8 +16,11 @@ from django.db import transaction
 from core.models import Project, UnitOfMeasure
 from core.permissions import can_edit_boq, can_view_boq, user_can_access_project
 
+from . import exporter, importer
 from .forms import BillForm, BOQItemForm
 from .models import BOQ, Bill, BOQItem
+
+IMPORT_TMP_DIR = os.path.join(settings.BASE_DIR, "boq", "import_tmp")
 
 
 def _get_project_and_check_boq_access(request, project_pk):
@@ -31,6 +39,27 @@ def _get_project_and_check_boq_access(request, project_pk):
     return project
 
 
+def _get_or_create_boq(project):
+    """
+    The project's current (only, for now) BOQ version. Versions and
+    approval are step 5's work, so every view before then works
+    against this single Draft/Original v1.
+    """
+    boq, _ = BOQ.objects.get_or_create(
+        project=project,
+        version_number=1,
+        defaults={"type": BOQ.TYPE_ORIGINAL, "status": BOQ.STATUS_DRAFT},
+    )
+    return boq
+
+
+def _require_boq_editable(request, project, boq):
+    if not can_edit_boq(request.user, project):
+        raise PermissionDenied("Your role cannot edit the BOQ.")
+    if not boq.is_editable:
+        raise PermissionDenied("Only a Draft BOQ version can be edited.")
+
+
 @login_required
 def boq_detail(request, project_pk):
     """
@@ -40,11 +69,7 @@ def boq_detail(request, project_pk):
     manually" starts from an empty BOQ, not a form asking to create one.
     """
     project = _get_project_and_check_boq_access(request, project_pk)
-    boq, _ = BOQ.objects.get_or_create(
-        project=project,
-        version_number=1,
-        defaults={"type": BOQ.TYPE_ORIGINAL, "status": BOQ.STATUS_DRAFT},
-    )
+    boq = _get_or_create_boq(project)
 
     can_edit = can_edit_boq(request.user, project)
 
@@ -153,10 +178,7 @@ def bill_items_save(request, project_pk, bill_pk):
     bill = get_object_or_404(Bill, pk=bill_pk, boq__project=project)
     boq = bill.boq
 
-    if not can_edit_boq(request.user, project):
-        raise PermissionDenied("Your role cannot edit the BOQ.")
-    if not boq.is_editable:
-        raise PermissionDenied("Only a Draft BOQ version can be edited.")
+    _require_boq_editable(request, project, boq)
 
     try:
         payload = json.loads(request.body)
@@ -230,3 +252,250 @@ def bill_items_save(request, project_pk, bill_pk):
             "grand_total": str(boq.grand_total),
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# Excel / PDF export (Section 4.2's "Export BOQ"). Read-only: gated on
+# can_view_boq, not can_edit_boq, since anyone who can see the BOQ should
+# be able to download it.
+# ---------------------------------------------------------------------------
+
+
+@login_required
+def export_xlsx(request, project_pk):
+    project = _get_project_and_check_boq_access(request, project_pk)
+    boq = _get_or_create_boq(project)
+    content = exporter.export_xlsx_bytes(boq)
+    response = HttpResponse(
+        content,
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    response["Content-Disposition"] = (
+        f'attachment; filename="boq_{project.code}_v{boq.version_number}.xlsx"'
+    )
+    return response
+
+
+@login_required
+def export_pdf(request, project_pk):
+    project = _get_project_and_check_boq_access(request, project_pk)
+    boq = _get_or_create_boq(project)
+    content = exporter.export_pdf_bytes(boq)
+    response = HttpResponse(content, content_type="application/pdf")
+    response["Content-Disposition"] = (
+        f'attachment; filename="boq_{project.code}_v{boq.version_number}.pdf"'
+    )
+    return response
+
+
+# ---------------------------------------------------------------------------
+# Excel import (Section 4.2's "Import BOQ from Excel"). Upload -> preview
+# (with an adjustable column mapping) -> confirm, all-or-nothing: nothing
+# is saved to the database until confirm re-validates every row and finds
+# no errors. Requires edit access, same as the manual-entry grid.
+# ---------------------------------------------------------------------------
+
+
+def _import_tmp_path(token):
+    os.makedirs(IMPORT_TMP_DIR, exist_ok=True)
+    # token is a uuid4 hex we generated ourselves, never taken from the
+    # request unescaped into a path — see import_preview/import_confirm.
+    return os.path.join(IMPORT_TMP_DIR, f"{token}.xlsx")
+
+
+def _mapping_from_request(request, headers):
+    mapping = {}
+    for field in importer.ALL_FIELDS:
+        raw = request.POST.get(f"map_{field}", "")
+        if raw.isdigit() and int(raw) < len(headers):
+            mapping[field] = int(raw)
+    return mapping
+
+
+def _render_import_preview(request, project, boq, token, headers, mapping, confirm_error=None):
+    rows = importer.parse_rows(_import_tmp_path(token), mapping, project, boq)
+    bill_numbers = {row["bill_number"] for row in rows if row["bill_number"] is not None}
+    return render(
+        request,
+        "boq/import_preview.html",
+        {
+            "project": project,
+            "boq": boq,
+            "token": token,
+            "headers": list(enumerate(headers)),
+            "fields": importer.ALL_FIELDS,
+            "field_labels": importer.FIELD_LABELS,
+            "mapping": mapping,
+            "rows": rows,
+            "row_count": len(rows),
+            "error_count": sum(1 for row in rows if row["errors"]),
+            "bill_count": len(bill_numbers),
+            "confirm_error": confirm_error,
+        },
+    )
+
+
+def _valid_token_path(token):
+    """
+    A safe path for a token straight from the request: reject anything
+    that isn't a bare uuid4 hex string before it ever reaches os.path,
+    so a crafted token can't be used to read or write outside
+    IMPORT_TMP_DIR.
+    """
+    if not token or len(token) != 32 or not all(c in "0123456789abcdef" for c in token):
+        return None
+    path = _import_tmp_path(token)
+    return path if os.path.exists(path) else None
+
+
+@login_required
+def import_upload(request, project_pk):
+    """GET: the upload form. POST: save the file and show the mapping/preview screen."""
+    project = _get_project_and_check_boq_access(request, project_pk)
+    boq = _get_or_create_boq(project)
+    _require_boq_editable(request, project, boq)
+
+    if request.method == "POST":
+        uploaded = request.FILES.get("boq_file")
+        if not uploaded:
+            return render(
+                request,
+                "boq/import_upload.html",
+                {"project": project, "boq": boq, "error": "Choose a file to upload."},
+            )
+
+        token = uuid.uuid4().hex
+        path = _import_tmp_path(token)
+        with open(path, "wb") as destination:
+            for chunk in uploaded.chunks():
+                destination.write(chunk)
+
+        try:
+            headers = importer.read_headers(path)
+        except Exception:
+            os.remove(path)
+            return render(
+                request,
+                "boq/import_upload.html",
+                {
+                    "project": project,
+                    "boq": boq,
+                    "error": "Could not read that file as an Excel workbook (.xlsx).",
+                },
+            )
+
+        mapping = importer.auto_detect_mapping(headers)
+        return _render_import_preview(request, project, boq, token, headers, mapping)
+
+    return render(request, "boq/import_upload.html", {"project": project, "boq": boq})
+
+
+@login_required
+@require_POST
+def import_preview(request, project_pk):
+    """The "Update preview" button: re-parses the same uploaded file with an adjusted mapping."""
+    project = _get_project_and_check_boq_access(request, project_pk)
+    boq = _get_or_create_boq(project)
+    _require_boq_editable(request, project, boq)
+
+    path = _valid_token_path(request.POST.get("token", ""))
+    if path is None:
+        return redirect("boq:import_upload", project_pk=project.pk)
+
+    headers = importer.read_headers(path)
+    mapping = _mapping_from_request(request, headers)
+    return _render_import_preview(
+        request, project, boq, request.POST.get("token", ""), headers, mapping
+    )
+
+
+@login_required
+@require_POST
+def import_confirm(request, project_pk):
+    """
+    The "Confirm import" button: re-validates every row server-side one
+    more time (never trusts the preview the browser is showing) and,
+    only if none of them have errors, creates the bills and items
+    inside one transaction. A single bad row aborts the whole import —
+    there is no partial import.
+    """
+    project = _get_project_and_check_boq_access(request, project_pk)
+    boq = _get_or_create_boq(project)
+    _require_boq_editable(request, project, boq)
+
+    token = request.POST.get("token", "")
+    path = _valid_token_path(token)
+    if path is None:
+        return redirect("boq:import_upload", project_pk=project.pk)
+
+    headers = importer.read_headers(path)
+    mapping = _mapping_from_request(request, headers)
+    rows = importer.parse_rows(path, mapping, project, boq)
+
+    if not rows:
+        return _render_import_preview(
+            request, project, boq, token, headers, mapping,
+            confirm_error="No rows were found to import.",
+        )
+    if any(row["errors"] for row in rows):
+        return _render_import_preview(
+            request, project, boq, token, headers, mapping,
+            confirm_error=(
+                "Fix every row's errors below before confirming — "
+                "nothing has been imported yet."
+            ),
+        )
+
+    bills_by_number = {}
+    with transaction.atomic():
+        next_sort_order = boq.bills.count()
+        for row in rows:
+            bill = bills_by_number.get(row["bill_number"])
+            if bill is None:
+                bill, created = Bill.objects.get_or_create(
+                    boq=boq,
+                    number=row["bill_number"],
+                    defaults={"title": row["bill_title"], "sort_order": next_sort_order},
+                )
+                if created:
+                    next_sort_order += 1
+                bills_by_number[row["bill_number"]] = bill
+
+            item = BOQItem(
+                bill=bill,
+                item_reference=row["item_reference"],
+                description=row["description"],
+                item_type=row["item_type"],
+                unit_id=row["unit_id"],
+                quantity=Decimal(row["quantity"]) if row["quantity"] else None,
+                rate=Decimal(row["rate"]) if row["rate"] else None,
+                section_id=row["section_id"],
+                sort_order=row["row_number"],
+            )
+            # Rules 1/2 (amount calculation, lump sum quantity/unit
+            # forcing) are applied by BOQItem.save() itself, same as
+            # every other way an item gets created — not recomputed
+            # here, so there's exactly one place that logic lives.
+            item.save()
+
+    os.remove(path)
+    messages.success(
+        request,
+        f"Imported {len(rows)} item(s) across {len(bills_by_number)} bill(s). "
+        f"New grand total: {boq.grand_total}.",
+    )
+    return redirect("boq:boq_detail", project_pk=project.pk)
+
+
+@login_required
+def import_template(request, project_pk):
+    """Downloads a blank .xlsx with the flat-layout header row and a couple of example rows."""
+    project = _get_project_and_check_boq_access(request, project_pk)
+    _get_or_create_boq(project)  # just to reuse the same access check as the rest of import/export
+    content = exporter.build_import_template_bytes()
+    response = HttpResponse(
+        content,
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    response["Content-Disposition"] = 'attachment; filename="boq_import_template.xlsx"'
+    return response

@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% load boq_extras %}
+
+{% block title %}Import BOQ — {{ project.code }}{% endblock %}
+
+{% block content %}
+<p><a href="{% url 'boq:import_upload' project.pk %}">&larr; Upload a different file</a></p>
+<h1>Import BOQ — preview</h1>
+
+{% if confirm_error %}
+<p><strong>{{ confirm_error }}</strong></p>
+{% endif %}
+
+<p>
+    {{ row_count }} row(s) found, across {{ bill_count }} bill(s).
+    {% if error_count %}
+        <strong>{{ error_count }} row(s) have errors</strong> — fix the
+        column mapping below if a whole column looks wrong, or fix the
+        source file and re-upload. Nothing is imported until every row
+        is error-free and you confirm.
+    {% else %}
+        No errors found.
+    {% endif %}
+</p>
+
+<h2>Column mapping</h2>
+<form method="post" action="{% url 'boq:import_preview' project.pk %}" id="mapping-form">
+    {% csrf_token %}
+    <input type="hidden" name="token" value="{{ token }}">
+    <table border="1" cellpadding="4">
+        <tr>
+            {% for field in fields %}
+            <th>{{ field_labels|get_item:field }}</th>
+            {% endfor %}
+        </tr>
+        <tr>
+            {% for field in fields %}
+            <td>
+                <select name="map_{{ field }}" form="mapping-form">
+                    <option value="">-- not mapped --</option>
+                    {% for index, header in headers %}
+                    <option value="{{ index }}" {% if mapping|get_item:field == index %}selected{% endif %}>{{ header }}</option>
+                    {% endfor %}
+                </select>
+            </td>
+            {% endfor %}
+        </tr>
+    </table>
+    <button type="submit">Update preview</button>
+</form>
+
+<h2>Preview ({{ row_count }} row{{ row_count|pluralize }})</h2>
+<table border="1" cellpadding="4">
+    <thead>
+        <tr>
+            <th>Row</th>
+            <th>Bill</th>
+            <th>Item ref</th>
+            <th>Description</th>
+            <th>Unit</th>
+            <th>Qty</th>
+            <th>Rate</th>
+            <th>Amount</th>
+            <th>Type</th>
+            <th>Errors</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for row in rows %}
+        <tr {% if row.errors %}style="background:#fdd"{% endif %}>
+            <td>{{ row.row_number }}</td>
+            <td>{{ row.bill_number }} — {{ row.bill_title }}</td>
+            <td>{{ row.item_reference }}</td>
+            <td>{{ row.description }}</td>
+            <td>{{ row.unit_code }}</td>
+            <td>{{ row.quantity }}</td>
+            <td>{{ row.rate }}</td>
+            <td>{{ row.amount }}</td>
+            <td>{{ row.item_type }}</td>
+            <td>
+                {% for error in row.errors %}
+                {{ error }}<br>
+                {% endfor %}
+            </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="10">No rows found — check the column mapping above.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+<form method="post" action="{% url 'boq:import_confirm' project.pk %}">
+    {% csrf_token %}
+    <input type="hidden" name="token" value="{{ token }}">
+    {% for field in fields %}
+        <input type="hidden" name="map_{{ field }}" value="{{ mapping|get_item:field }}">
+    {% endfor %}
+    <button type="submit" {% if error_count or not rows %}disabled{% endif %}>
+        Confirm import ({{ row_count }} item{{ row_count|pluralize }})
+    </button>
+</form>
+{% endblock %}
