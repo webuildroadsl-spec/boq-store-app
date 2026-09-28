@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+
+{% block title %}Request materials — {{ project.code }}{% endblock %}
+
+{% block content %}
+<p><a href="{% url 'store:requisition_list' project.pk %}">&larr; Requisitions — {{ project.code }}</a></p>
+<h1>Request materials — {{ project.code }}</h1>
+
+<form method="post">
+    {% csrf_token %}
+    {{ form.as_p }}
+    <button type="submit">Create as Pending</button>
+</form>
+{% endblock %}

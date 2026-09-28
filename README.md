@@ -4,7 +4,7 @@ Django + PostgreSQL backend for the BOQ and Store modules described in
 [`docs/requirements.md`](docs/requirements.md). This repo is being built
 one step at a time from Section 8 of that spec.
 
-**Current status: Step 6 of 10** — Store items, suppliers, stores; GRN.
+**Current status: Step 7 of 10** — Requisition, issue, return.
 
 ## Setup (local development)
 
@@ -349,6 +349,115 @@ mistake, and rule 6 ("an item with stock issued can't be deleted in a
 later BOQ version") still has nothing to enforce. Material allowances
 linking a BOQ item to a store item (step 9) don't exist yet either,
 so `StockMovement.boq_item` is wired up but nothing sets it.
+
+## Requisition, issue, return (step 7)
+
+Materials now leave a store, not just arrive. Two new document types
+join GRN, plus a request that precedes them:
+
+- **Store requisition is project-scoped, not store-scoped.** Section
+  5's own data-model table lists a requisition's fields as "number,
+  date, **project**, section, requested by, lines" — no store —
+  because the person asking for materials doesn't know which store
+  will end up fulfilling the request; that's the Storekeeper's call,
+  made later, at issue time. `store.permissions.can_create_requisition`
+  restricts creating one to Project Manager or Site Engineer (Section
+  2's row for this action), deliberately excluding QS and Storekeeper.
+  A requisition's status (Pending / Partly issued / Issued / Rejected)
+  is never set by hand except Rejected — `update_status()` recomputes
+  it from how much of each line has actually been issued, every time
+  an issue against it is posted, and never overwrites a Rejected
+  status once it's set.
+- **Issue connects to a requisition optionally.** `Issue.requisition`
+  is nullable — a Storekeeper can issue directly against a BOQ item
+  with no requisition at all, or against one, per Section 5.2's "the
+  Storekeeper issues materials against a requisition (or directly,
+  with a BOQ item)." Either way, posting is where stock actually
+  leaves: `Issue.post(user)` is the exact step 7 acceptance test.
+- **The acceptance test, enforced in one place, checked in several.**
+  "Issuing 250 bags when stock is 200 is blocked" — every line's
+  requested quantity is summed *per item across the whole issue*
+  before comparing against `StockMovement.current_balance()`, so two
+  lines for the same item in one issue can't sneak past a naive
+  line-by-line check. "Issue without a BOQ item is blocked" is
+  enforced at three layers, defense-in-depth: `IssueLine.boq_item` has
+  no `null=True` at the database level (a plain `NOT NULL` column, so
+  even a direct ORM `.update()` can't bypass it — confirmed by test);
+  `IssueLineForm`'s `boq_item` field is a required `ModelChoiceField`
+  with no blank option, so a line without one never even saves — the
+  form re-renders with "This field is required" instead of redirecting;
+  and `Issue.post()` re-checks `boq_item_id is None` anyway, the same
+  "never trust a single layer" habit used everywhere else in this app.
+  Both checks run for *every* line before any `StockMovement` is
+  written — one bad line blocks the whole issue, not just itself, same
+  all-or-nothing reasoning as GRN posting and the BOQ Excel import.
+  The unit cost used for each movement is the store's current
+  weighted-average cost, computed *once per item* at the start of
+  posting rather than per line, so multiple lines for the same item
+  in one issue all see the same cost.
+- **Return to store restores stock at the store's current average
+  cost**, not whatever cost the material was originally issued at —
+  there's nothing recorded anywhere that tracks that, since Section
+  5.1 doesn't ask for it on the Issue itself. This is a disclosed
+  simplification: a return posted long after the store's average cost
+  has moved on will credit stock back in at today's average, not
+  yesterday's. `ReturnLine.boq_item` is optional (unlike `IssueLine`'s,
+  which is required) — the spec's acceptance test only names issuing,
+  not returning, so returning without a BOQ item is allowed. A
+  Damaged-condition line still restores quantity (the item is
+  physically back in the store); valuing damaged stock differently, or
+  writing it off, is future work.
+- **Still no reversing-document type.** Same gap as GRN in step 6: a
+  Posted issue or return "cannot be edited or deleted" per Section 2,
+  and there's still nothing to correct a mistake with except a fresh
+  document in the opposite direction (a return to undo an issue,
+  another issue to undo an over-generous return) — not a true reversal,
+  just the closest tool available until steps 7-8's reversing documents
+  (if any are added) or a dedicated correction flow exists.
+- **A `return_line_delete` view was added for parity** with GRN's and
+  Issue's line-delete, so a Draft return's lines can be removed through
+  the UI the same way a Draft GRN's or issue's can — this wasn't
+  strictly required by the acceptance test but left it out would have
+  been an inconsistency, not a deliberate simplification.
+
+**The step 7 acceptance test** was run manually end-to-end over real
+HTTP, in addition to being a unit and view test: logged in as the
+store's storekeeper with a store already carrying exactly 200 t of
+stock (from a posted GRN, same as step 6), created a Draft issue,
+added a line for 250 t against a real BOQ item, and posting was
+blocked with exactly `CEM-01-SMK: issuing 250.000 t would exceed the
+200.000 t in stock at MAIN.` — stock and issue status were unchanged
+afterward. Separately, adding a line with no BOQ item re-rendered the
+form with "This field is required" rather than saving anything.
+Deleting the bad line, adding a valid 150 t line, and posting
+succeeded normally; a return of 50 t against that issue then posted
+and brought the balance back to 100 t at the same 150.00 average cost.
+The project-scoped requisition flow (create as Pending, reject) was
+also exercised as a Project Manager. Smoke-test data cleaned up
+afterward.
+
+**Tested:** `store/tests.py` — the acceptance test itself at the model
+level (250 blocked, exactly 200 allowed), the database-level rejection
+of a null `boq_item`, the average-cost calculation an issue uses
+(confirmed to use the *current* average, not a stale GRN cost),
+requisition status recomputation across two partial issues, rejecting
+a requisition (and refusing to reject twice), and a return restoring
+stock at the average cost the store still carried. `store/test_views.py`
+— requisition creation restricted to PM/Site Engineer (QS and
+Storekeeper blocked), rejecting a requisition over the test client,
+the full issue create → add line → post flow, the 250-when-200 block
+surfacing as a page error, a missing-BOQ-item line being rejected by
+the form, a Storekeeper being blocked from managing issues at a store
+they don't keep, and a full return create → add line → post flow. 125
+tests pass overall (108 existing + 17 new).
+
+**Not built** (deliberately, later steps per Section 8): transfer
+between stores and stock count/adjustment (step 8) — so there's still
+no way to move stock between stores without an issue-then-GRN
+workaround, and no reversing-document type exists for any Posted
+document yet, GRN included. Material allowances linking a BOQ item to
+a store item (step 9) still don't exist, so the `boq_item` recorded on
+each issue/return movement isn't reconciled against anything yet.
 
 ## How project access is scoped (step 2)
 

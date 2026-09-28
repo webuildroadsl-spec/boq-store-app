@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+
+{% block title %}Requisition {{ requisition.number }} — {{ project.code }}{% endblock %}
+
+{% block content %}
+<p><a href="{% url 'store:requisition_list' project.pk %}">&larr; Requisitions — {{ project.code }}</a></p>
+<h1>Requisition {{ requisition.number }} — {{ project.code }} ({{ requisition.get_status_display }})</h1>
+
+<dl>
+    <dt>Date</dt><dd>{{ requisition.date }}</dd>
+    <dt>Section</dt><dd>{{ requisition.section|default:"—" }}</dd>
+    <dt>Requested by</dt><dd>{{ requisition.requested_by }}</dd>
+</dl>
+
+<h2>Lines</h2>
+<table border="1" cellpadding="4">
+    <thead>
+        <tr><th>Item</th><th>Quantity requested</th><th>BOQ item</th></tr>
+    </thead>
+    <tbody>
+        {% for line in lines %}
+        <tr>
+            <td>{{ line.item.code }} — {{ line.item.name }}</td>
+            <td>{{ line.quantity }} {{ line.item.unit.code }}</td>
+            <td>{{ line.boq_item }}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="3">No lines yet.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+<p>Status ({{ requisition.get_status_display }}) is recomputed from linked issues each time an issue against
+    this requisition is posted, per line quantity issued vs. requested.</p>
+
+{% if can_create and requisition.is_editable %}
+<h2>Add a line</h2>
+<form method="post">
+    {% csrf_token %}
+    {{ line_form.as_p }}
+    <button type="submit">Add line</button>
+</form>
+
+<h2>Reject this requisition</h2>
+<form method="post">
+    {% csrf_token %}
+    <button type="submit" name="reject" value="1">Reject</button>
+</form>
+{% endif %}
+{% endblock %}

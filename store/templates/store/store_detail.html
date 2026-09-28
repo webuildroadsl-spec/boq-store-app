@@ -26,5 +26,11 @@
     </tbody>
 </table>
 
-<p><a href="{% url 'store:grn_list' project.pk store.pk %}">Goods received notes (GRN)</a></p>
+<p>
+    <a href="{% url 'store:grn_list' project.pk store.pk %}">Goods received notes (GRN)</a>
+    &nbsp;|&nbsp;
+    <a href="{% url 'store:issue_list' project.pk store.pk %}">Issues</a>
+    &nbsp;|&nbsp;
+    <a href="{% url 'store:return_list' project.pk store.pk %}">Returns</a>
+</p>
 {% endblock %}

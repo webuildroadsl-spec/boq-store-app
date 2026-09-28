@@ -2,6 +2,9 @@
 View and permission tests for step 6: recording, editing and posting a
 GRN through the Django test client, and the store-visibility scoping
 ("Own store" for a Storekeeper) from store.permissions.
+
+Step 7's view/permission tests (requisitions, issues, returns) follow
+further down.
 """
 
 from decimal import Decimal
@@ -10,17 +13,31 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase
 from django.urls import reverse
 
+from boq.models import BOQ, Bill, BOQItem
 from core.models import (
     Company,
     Project,
     ProjectMembership,
     ROLE_PROJECT_MANAGER,
+    ROLE_QS,
+    ROLE_SITE_ENGINEER,
     ROLE_STOREKEEPER,
     ROLE_VIEWER,
+    Section,
     UnitOfMeasure,
 )
 
-from .models import GRN, ItemCategory, Store, StockMovement, StoreItem, Supplier
+from .models import (
+    GRN,
+    Issue,
+    ItemCategory,
+    ReturnToStore,
+    Store,
+    StockMovement,
+    StoreItem,
+    StoreRequisition,
+    Supplier,
+)
 
 User = get_user_model()
 
@@ -186,3 +203,205 @@ class GRNWorkflowTests(StoreViewsTestCase):
 
         self.assertEqual(GRN.objects.get(store=self.store_a).number, 1)
         self.assertEqual(GRN.objects.get(store=self.store_b).number, 1)
+
+
+class RequisitionIssueReturnViewsTestCase(TestCase):
+    """Step 7: requisitions (project-scoped), issues and returns
+    (store-scoped), through the Django test client."""
+
+    def setUp(self):
+        company = Company.objects.create(name="Test Contractor Ltd")
+        self.project = Project.objects.create(company=company, code="STOREV-2", name="Store views test 2")
+        self.section = Section.objects.create(
+            project=self.project, code="S1", start_chainage="0.000", end_chainage="2.500"
+        )
+
+        self.storekeeper = User.objects.create_user(username="keeper", password="pw")
+        self.pm_user = User.objects.create_user(username="pm2", password="pw")
+        self.site_engineer = User.objects.create_user(username="site_eng", password="pw")
+        self.qs_user = User.objects.create_user(username="qs", password="pw")
+
+        ProjectMembership.objects.create(user=self.storekeeper, project=self.project, role=ROLE_STOREKEEPER)
+        ProjectMembership.objects.create(user=self.pm_user, project=self.project, role=ROLE_PROJECT_MANAGER)
+        ProjectMembership.objects.create(user=self.site_engineer, project=self.project, role=ROLE_SITE_ENGINEER)
+
+        self.store = Store.objects.create(
+            project=self.project, code="MAIN", name="Main yard", storekeeper=self.storekeeper
+        )
+        category = ItemCategory.objects.create(name="Cement and Binders")
+        self.item = StoreItem.objects.create(
+            code="CEM-01", name="Cement, 50kg bag", category=category, unit=UnitOfMeasure.objects.get(code="t")
+        )
+
+        boq = BOQ.objects.create(project=self.project, version_number=1, status=BOQ.STATUS_APPROVED)
+        bill = Bill.objects.create(boq=boq, number=1, title="Earthworks")
+        self.boq_item = BOQItem.objects.create(
+            bill=bill,
+            item_reference="1.01",
+            description="Supply and lay cement",
+            item_type=BOQItem.TYPE_MEASURED,
+            unit=UnitOfMeasure.objects.get(code="t"),
+            quantity=Decimal("1000"),
+            rate=Decimal("10.00"),
+        )
+
+        StockMovement.objects.create(
+            store=self.store,
+            item=self.item,
+            quantity=Decimal("200"),
+            unit_cost=Decimal("150.00"),
+            document_type=StockMovement.DOCUMENT_GRN,
+            document_id=1,
+            created_by=self.storekeeper,
+        )
+
+    def test_project_manager_can_create_a_requisition(self):
+        self.client.force_login(self.pm_user)
+        response = self.client.post(
+            reverse("store:requisition_create", args=[self.project.pk]),
+            {"date": "2026-02-01", "section": self.section.pk},
+        )
+        requisition = StoreRequisition.objects.get(project=self.project)
+        self.assertRedirects(
+            response, reverse("store:requisition_detail", args=[self.project.pk, requisition.pk])
+        )
+        self.assertEqual(requisition.requested_by, self.pm_user)
+        self.assertEqual(requisition.status, StoreRequisition.STATUS_PENDING)
+
+    def test_qs_cannot_create_a_requisition(self):
+        ProjectMembership.objects.create(user=self.qs_user, project=self.project, role=ROLE_QS)
+        self.client.force_login(self.qs_user)
+        response = self.client.post(
+            reverse("store:requisition_create", args=[self.project.pk]),
+            {"date": "2026-02-01", "section": self.section.pk},
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_storekeeper_cannot_create_a_requisition(self):
+        self.client.force_login(self.storekeeper)
+        response = self.client.post(
+            reverse("store:requisition_create", args=[self.project.pk]),
+            {"date": "2026-02-01", "section": self.section.pk},
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def _create_requisition(self):
+        requisition = StoreRequisition.objects.create(
+            number=1, date="2026-02-01", project=self.project, section=self.section, requested_by=self.pm_user
+        )
+        return requisition
+
+    def test_project_manager_can_reject_a_requisition(self):
+        requisition = self._create_requisition()
+        self.client.force_login(self.pm_user)
+        response = self.client.post(
+            reverse("store:requisition_detail", args=[self.project.pk, requisition.pk]), {"reject": "1"}
+        )
+        self.assertRedirects(
+            response, reverse("store:requisition_detail", args=[self.project.pk, requisition.pk])
+        )
+        requisition.refresh_from_db()
+        self.assertEqual(requisition.status, StoreRequisition.STATUS_REJECTED)
+
+    def _create_issue(self):
+        response = self.client.post(
+            reverse("store:issue_create", args=[self.project.pk, self.store.pk]),
+            {"date": "2026-02-01", "issued_to": "Site crew A"},
+        )
+        return response
+
+    def test_storekeeper_can_create_and_post_an_issue(self):
+        self.client.force_login(self.storekeeper)
+        create_response = self._create_issue()
+        issue = Issue.objects.get(store=self.store)
+        self.assertRedirects(
+            create_response, reverse("store:issue_detail", args=[self.project.pk, self.store.pk, issue.pk])
+        )
+
+        self.client.post(
+            reverse("store:issue_detail", args=[self.project.pk, self.store.pk, issue.pk]),
+            {"item": self.item.pk, "quantity": "200", "boq_item": self.boq_item.pk},
+        )
+        self.assertEqual(issue.lines.count(), 1)
+
+        post_response = self.client.post(
+            reverse("store:issue_post", args=[self.project.pk, self.store.pk, issue.pk])
+        )
+        self.assertRedirects(
+            post_response, reverse("store:issue_detail", args=[self.project.pk, self.store.pk, issue.pk])
+        )
+        issue.refresh_from_db()
+        self.assertEqual(issue.status, Issue.STATUS_POSTED)
+        quantity, _, _ = StockMovement.current_balance(self.store, self.item)
+        self.assertEqual(quantity, Decimal("0.000"))
+
+    def test_issuing_250_when_stock_is_200_is_blocked_and_shows_an_error(self):
+        self.client.force_login(self.storekeeper)
+        self._create_issue()
+        issue = Issue.objects.get(store=self.store)
+        self.client.post(
+            reverse("store:issue_detail", args=[self.project.pk, self.store.pk, issue.pk]),
+            {"item": self.item.pk, "quantity": "250", "boq_item": self.boq_item.pk},
+        )
+        response = self.client.post(
+            reverse("store:issue_post", args=[self.project.pk, self.store.pk, issue.pk]), follow=True
+        )
+        self.assertContains(response, "exceed")
+        issue.refresh_from_db()
+        self.assertEqual(issue.status, Issue.STATUS_DRAFT)
+
+    def test_issue_line_form_rejects_a_line_with_no_boq_item(self):
+        self.client.force_login(self.storekeeper)
+        self._create_issue()
+        issue = Issue.objects.get(store=self.store)
+        response = self.client.post(
+            reverse("store:issue_detail", args=[self.project.pk, self.store.pk, issue.pk]),
+            {"item": self.item.pk, "quantity": "10", "boq_item": ""},
+        )
+        # The form re-renders with an error rather than redirecting --
+        # the line-required-field is the "issue without a BOQ item is
+        # blocked" rule enforced before post() is ever reached.
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(issue.lines.count(), 0)
+
+    def test_pm_cannot_manage_issues_for_a_store_they_dont_keep(self):
+        self.client.force_login(self.pm_user)
+        response = self.client.post(
+            reverse("store:issue_create", args=[self.project.pk, self.store.pk]),
+            {"date": "2026-02-01", "issued_to": "Site crew A"},
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_storekeeper_can_create_and_post_a_return(self):
+        self.client.force_login(self.storekeeper)
+        self._create_issue()
+        issue = Issue.objects.get(store=self.store)
+        self.client.post(
+            reverse("store:issue_detail", args=[self.project.pk, self.store.pk, issue.pk]),
+            {"item": self.item.pk, "quantity": "150", "boq_item": self.boq_item.pk},
+        )
+        self.client.post(reverse("store:issue_post", args=[self.project.pk, self.store.pk, issue.pk]))
+
+        create_response = self.client.post(
+            reverse("store:return_create", args=[self.project.pk, self.store.pk]),
+            {"date": "2026-02-05", "linked_issue": issue.pk},
+        )
+        ret = ReturnToStore.objects.get(store=self.store)
+        self.assertRedirects(
+            create_response, reverse("store:return_detail", args=[self.project.pk, self.store.pk, ret.pk])
+        )
+
+        self.client.post(
+            reverse("store:return_detail", args=[self.project.pk, self.store.pk, ret.pk]),
+            {"item": self.item.pk, "quantity": "50", "condition": "good", "boq_item": self.boq_item.pk},
+        )
+        post_response = self.client.post(
+            reverse("store:return_post", args=[self.project.pk, self.store.pk, ret.pk])
+        )
+        self.assertRedirects(
+            post_response, reverse("store:return_detail", args=[self.project.pk, self.store.pk, ret.pk])
+        )
+        ret.refresh_from_db()
+        self.assertEqual(ret.status, ReturnToStore.STATUS_POSTED)
+        quantity, _, _ = StockMovement.current_balance(self.store, self.item)
+        self.assertEqual(quantity, Decimal("100.000"))

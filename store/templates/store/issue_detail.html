@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+
+{% block title %}Issue {{ issue.number }} — {{ store.code }}{% endblock %}
+
+{% block content %}
+<p><a href="{% url 'store:issue_list' project.pk store.pk %}">&larr; Issues — {{ store.code }}</a></p>
+<h1>Issue {{ issue.number }} — {{ store.code }} ({{ issue.get_status_display }})</h1>
+
+<dl>
+    <dt>Date</dt><dd>{{ issue.date }}</dd>
+    <dt>Requisition</dt><dd>{{ issue.requisition|default:"—" }}</dd>
+    <dt>Issued to</dt><dd>{{ issue.issued_to }}</dd>
+</dl>
+
+<h2>Lines</h2>
+<table border="1" cellpadding="4">
+    <thead>
+        <tr><th>Item</th><th>Quantity</th><th>BOQ item</th><th>Section</th><th></th></tr>
+    </thead>
+    <tbody>
+        {% for line in lines %}
+        <tr>
+            <td>{{ line.item.code }} — {{ line.item.name }}</td>
+            <td>{{ line.quantity }} {{ line.item.unit.code }}</td>
+            <td>{{ line.boq_item }}</td>
+            <td>{{ line.section|default:"—" }}</td>
+            <td>
+                {% if can_manage and issue.is_editable %}
+                <form method="post" action="{% url 'store:issue_line_delete' project.pk store.pk issue.pk line.pk %}">
+                    {% csrf_token %}
+                    <button type="submit">Remove</button>
+                </form>
+                {% endif %}
+            </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="5">No lines yet.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+{% if can_manage and issue.is_editable %}
+<h2>Add a line</h2>
+<p>Every line must name a BOQ item — an issue with no BOQ item on a line is blocked at posting.</p>
+<form method="post">
+    {% csrf_token %}
+    {{ line_form.as_p }}
+    <button type="submit">Add line</button>
+</form>
+
+<h2>Post this issue</h2>
+<p>Posting removes stock from {{ store.code }} at the store's current average cost, and locks this issue —
+    per Section 2's rule, a Posted document cannot be edited or deleted afterward. Posting is blocked if any
+    line's quantity would take an item's balance below zero, or if any line has no BOQ item.</p>
+<form method="post" action="{% url 'store:issue_post' project.pk store.pk issue.pk %}">
+    {% csrf_token %}
+    <button type="submit" {% if not lines %}disabled{% endif %}>Post issue</button>
+</form>
+{% endif %}
+{% endblock %}

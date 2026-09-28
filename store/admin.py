@@ -1,6 +1,21 @@
 from django.contrib import admin
 
-from .models import GRN, GRNAttachment, GRNLine, ItemCategory, Store, StockMovement, StoreItem, Supplier
+from .models import (
+    GRN,
+    GRNAttachment,
+    GRNLine,
+    Issue,
+    IssueLine,
+    ItemCategory,
+    RequisitionLine,
+    ReturnLine,
+    ReturnToStore,
+    Store,
+    StockMovement,
+    StoreItem,
+    StoreRequisition,
+    Supplier,
+)
 
 
 @admin.register(ItemCategory)
@@ -50,3 +65,39 @@ class StockMovementAdmin(admin.ModelAdmin):
     list_display = ("store", "item", "quantity", "unit_cost", "total_cost", "document_type", "document_id", "created_at")
     list_filter = ("store", "document_type")
     search_fields = ("item__code", "item__name")
+
+
+class RequisitionLineInline(admin.TabularInline):
+    model = RequisitionLine
+    extra = 0
+
+
+@admin.register(StoreRequisition)
+class StoreRequisitionAdmin(admin.ModelAdmin):
+    list_display = ("project", "number", "date", "section", "requested_by", "status")
+    list_filter = ("status", "project")
+    inlines = [RequisitionLineInline]
+
+
+class IssueLineInline(admin.TabularInline):
+    model = IssueLine
+    extra = 0
+
+
+@admin.register(Issue)
+class IssueAdmin(admin.ModelAdmin):
+    list_display = ("store", "number", "date", "requisition", "issued_to", "status")
+    list_filter = ("status", "store")
+    inlines = [IssueLineInline]
+
+
+class ReturnLineInline(admin.TabularInline):
+    model = ReturnLine
+    extra = 0
+
+
+@admin.register(ReturnToStore)
+class ReturnToStoreAdmin(admin.ModelAdmin):
+    list_display = ("store", "number", "date", "linked_issue", "returned_by", "status")
+    list_filter = ("status", "store")
+    inlines = [ReturnLineInline]

@@ -3,11 +3,11 @@ Store module (Section 5): every material movement goes through a
 posted document, and the stock balance is always calculated from those
 movements — never typed in or stored as a running total anywhere.
 
-Step 6 builds the master data (Item category, Store, Store item,
-Supplier) and the first posted document, GRN (goods received).
-Requisition, Issue, Transfer, Return and Stock count (Section 5.2's
-other document types) are steps 7-8. Material allowances (the BOQ-
-Store link) are step 9.
+Step 6 built the master data (Item category, Store, Store item,
+Supplier) and the first posted document, GRN (goods received). Step 7
+adds Requisition, Issue and Return (Section 5.2 points 1, 3 and 5).
+Transfer and Stock count (points 4 and 6) are step 8. Material
+allowances (the BOQ-Store link) are step 9.
 
 Item category, Store item and Supplier are managed through /admin/,
 the same way Company/UnitOfMeasure/ProjectMembership already are (see
@@ -109,10 +109,10 @@ class StockMovement(models.Model):
     `unit_cost` / `total_cost` are always *this movement's own* cost —
     which is what makes a weighted-average balance just
     sum(total_cost) / sum(quantity) over every movement for a given
-    store+item (see `current_balance()`). An issue's unit_cost will be
-    the average cost *at the moment it's posted* (computed then, fixed
-    afterward) once step 7 adds issues, so that sum keeps working even
-    after stock leaves as well as arrives.
+    store+item (see `current_balance()`). An issue's unit_cost is the
+    average cost *at the moment it's posted* (computed then, fixed
+    afterward -- see `Issue.post()`), which is what keeps this sum
+    correct even once stock leaves as well as arrives.
 
     `document_type` + `document_id` name the posted document that
     created this movement, spelled out as plain fields (not a
@@ -123,9 +123,13 @@ class StockMovement(models.Model):
     """
 
     DOCUMENT_GRN = "grn"
+    DOCUMENT_ISSUE = "issue"
+    DOCUMENT_RETURN = "return"
     DOCUMENT_CHOICES = [
         (DOCUMENT_GRN, "GRN"),
-        # issue / transfer / return / adjustment join this list in steps 7-8.
+        (DOCUMENT_ISSUE, "Issue"),
+        (DOCUMENT_RETURN, "Return to store"),
+        # transfer / adjustment join this list in step 8.
     ]
 
     store = models.ForeignKey(Store, on_delete=models.PROTECT, related_name="movements")
@@ -271,3 +275,307 @@ class GRNAttachment(models.Model):
 
     def __str__(self):
         return self.file.name
+
+
+class StoreRequisition(models.Model):
+    """
+    Section 5.2 point 1: "a Site Engineer requests materials for a BOQ
+    item and section." Unlike a GRN or Issue, a requisition names a
+    *project*, not a store -- the requester doesn't pick which store
+    fulfils it, the Storekeeper does, at issue time (`Issue.requisition`).
+
+    Numbers are scoped per project (there's no store yet to scope them
+    to). Status starts Pending and is recomputed by `update_status()`
+    every time an Issue that references this requisition is posted --
+    there's no separate "submit" step the way a GRN has Draft-then-Post,
+    since a requisition is usable for issuing from the moment it's
+    created.
+    """
+
+    STATUS_PENDING = "pending"
+    STATUS_PARTLY_ISSUED = "partly_issued"
+    STATUS_ISSUED = "issued"
+    STATUS_REJECTED = "rejected"
+    STATUS_CHOICES = [
+        (STATUS_PENDING, "Pending"),
+        (STATUS_PARTLY_ISSUED, "Partly issued"),
+        (STATUS_ISSUED, "Issued"),
+        (STATUS_REJECTED, "Rejected"),
+    ]
+
+    number = models.PositiveIntegerField()
+    date = models.DateField()
+    project = models.ForeignKey(Project, on_delete=models.PROTECT, related_name="requisitions")
+    section = models.ForeignKey(Section, on_delete=models.PROTECT, related_name="requisitions")
+    requested_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="+")
+    status = models.CharField(max_length=15, choices=STATUS_CHOICES, default=STATUS_PENDING)
+
+    class Meta:
+        ordering = ["project", "number"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["project", "number"], name="unique_requisition_number_per_project"
+            )
+        ]
+
+    def __str__(self):
+        return f"Requisition {self.number} — {self.project.code}"
+
+    @property
+    def is_editable(self):
+        return self.status == self.STATUS_PENDING
+
+    def issued_quantity(self, item):
+        """How much of `item` has been issued so far against this
+        requisition (summed across every Issue that references it,
+        posted or not -- a Draft issue already "claims" the quantity
+        on it, same as the storekeeper would treat a request they're
+        part-way through fulfilling)."""
+        return self.issues.filter(lines__item=item).aggregate(
+            total=models.Sum("lines__quantity", filter=models.Q(lines__item=item))
+        )["total"] or Decimal("0.000")
+
+    def update_status(self):
+        """Recomputes Pending/Partly issued/Issued from how much of
+        each requested line has actually been issued. Never overrides
+        Rejected -- that's a separate, manual decision."""
+        if self.status == self.STATUS_REJECTED:
+            return
+        lines = list(self.lines.all())
+        if not lines:
+            return
+        issued_amounts = [self.issued_quantity(line.item) for line in lines]
+        if all(issued >= line.quantity for issued, line in zip(issued_amounts, lines)):
+            self.status = self.STATUS_ISSUED
+        elif any(issued > 0 for issued in issued_amounts):
+            self.status = self.STATUS_PARTLY_ISSUED
+        else:
+            self.status = self.STATUS_PENDING
+        self.save()
+
+    def reject(self):
+        if self.status not in (self.STATUS_PENDING, self.STATUS_PARTLY_ISSUED):
+            raise ValidationError("Only a Pending or Partly issued requisition can be rejected.")
+        self.status = self.STATUS_REJECTED
+        self.save()
+
+
+class RequisitionLine(models.Model):
+    requisition = models.ForeignKey(StoreRequisition, on_delete=models.CASCADE, related_name="lines")
+    item = models.ForeignKey(StoreItem, on_delete=models.PROTECT, related_name="+")
+    quantity = models.DecimalField(max_digits=14, decimal_places=3)
+    # "for a BOQ item" -- required, same as an Issue line's, so a
+    # requisition can't itself be the loophole around that rule.
+    boq_item = models.ForeignKey("boq.BOQItem", on_delete=models.PROTECT, related_name="+")
+
+    class Meta:
+        ordering = ["pk"]
+
+    def __str__(self):
+        return f"{self.item.code} x{self.quantity}"
+
+
+class Issue(models.Model):
+    """
+    Section 5.2 point 3: "the Storekeeper issues materials against a
+    requisition (or directly, with a BOQ item). Posting removes stock."
+    `requisition` is optional (a direct issue skips it entirely), but
+    every line still needs its own `boq_item` regardless -- that's the
+    step 7 acceptance test's second half: "issue without a BOQ item is
+    blocked."
+    """
+
+    STATUS_DRAFT = "draft"
+    STATUS_POSTED = "posted"
+    STATUS_CHOICES = [(STATUS_DRAFT, "Draft"), (STATUS_POSTED, "Posted")]
+
+    number = models.PositiveIntegerField()
+    date = models.DateField()
+    store = models.ForeignKey(Store, on_delete=models.PROTECT, related_name="issues")
+    requisition = models.ForeignKey(
+        StoreRequisition, on_delete=models.PROTECT, null=True, blank=True, related_name="issues"
+    )
+    issued_to = models.CharField(max_length=255, help_text="A person or a plant/vehicle.")
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default=STATUS_DRAFT)
+
+    class Meta:
+        ordering = ["store", "number"]
+        constraints = [
+            models.UniqueConstraint(fields=["store", "number"], name="unique_issue_number_per_store")
+        ]
+
+    def __str__(self):
+        return f"Issue {self.number} — {self.store.code}"
+
+    @property
+    def is_editable(self):
+        return self.status == self.STATUS_DRAFT
+
+    def post(self, user):
+        """
+        Rule (step 7 acceptance test): issuing more than is in stock is
+        blocked, and every line must carry a BOQ item. Both are
+        checked for *every* line before anything is written -- one bad
+        line blocks the whole issue, same all-or-nothing reasoning as
+        the BOQ Excel import and GRN posting.
+
+        The unit cost recorded on each movement is the store's current
+        weighted-average cost for that item, taken once at the start of
+        posting (not per line), so two lines for the same item in one
+        issue don't see a different cost mid-way through.
+        """
+        if self.status != self.STATUS_DRAFT:
+            raise ValidationError("Only a Draft issue can be posted.")
+        lines = list(self.lines.select_related("item"))
+        if not lines:
+            raise ValidationError("An issue needs at least one line before it can be posted.")
+
+        errors = []
+        cost_by_item = {}
+        requested_by_item = {}
+        for line in lines:
+            if line.boq_item_id is None:
+                errors.append(f"{line.item.code}: an issue line must have a BOQ item.")
+            requested_by_item[line.item_id] = requested_by_item.get(line.item_id, Decimal("0")) + line.quantity
+
+        for item_id, requested in requested_by_item.items():
+            item = next(l.item for l in lines if l.item_id == item_id)
+            available, _, average_cost = StockMovement.current_balance(self.store, item)
+            if requested > available:
+                errors.append(
+                    f"{item.code}: issuing {requested} {item.unit.code} would exceed the "
+                    f"{available} {item.unit.code} in stock at {self.store.code}."
+                )
+            cost_by_item[item_id] = average_cost
+
+        if errors:
+            raise ValidationError(errors)
+
+        with transaction.atomic():
+            for line in lines:
+                StockMovement.objects.create(
+                    store=self.store,
+                    item=line.item,
+                    quantity=-line.quantity,
+                    unit_cost=cost_by_item[line.item_id],
+                    document_type=StockMovement.DOCUMENT_ISSUE,
+                    document_id=self.pk,
+                    boq_item_id=line.boq_item_id,
+                    section_id=line.section_id,
+                    created_by=user,
+                )
+            self.status = self.STATUS_POSTED
+            self.save()
+            if self.requisition_id:
+                self.requisition.update_status()
+
+
+class IssueLine(models.Model):
+    issue = models.ForeignKey(Issue, on_delete=models.CASCADE, related_name="lines")
+    item = models.ForeignKey(StoreItem, on_delete=models.PROTECT, related_name="+")
+    quantity = models.DecimalField(max_digits=14, decimal_places=3)
+    # Required (no null=True): "issue without a BOQ item is blocked" is
+    # enforced here, at the field, not just in post() -- a form can't
+    # even save a line without one.
+    boq_item = models.ForeignKey("boq.BOQItem", on_delete=models.PROTECT, related_name="+")
+    section = models.ForeignKey(
+        Section, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+
+    class Meta:
+        ordering = ["pk"]
+
+    def __str__(self):
+        return f"{self.item.code} x{self.quantity}"
+
+
+class ReturnToStore(models.Model):
+    """
+    Section 5.2 point 5: "unused materials come back and are credited
+    to the original BOQ item." `linked_issue` is optional (a return
+    doesn't have to trace back to one specific issue), and each line's
+    `boq_item` defaults to the credit target when the return is
+    created from a linked issue, but can be set directly -- unlike
+    Issue, this isn't hard-required, since the spec's step 7
+    acceptance test only names issuing, not returning.
+    """
+
+    STATUS_DRAFT = "draft"
+    STATUS_POSTED = "posted"
+    STATUS_CHOICES = [(STATUS_DRAFT, "Draft"), (STATUS_POSTED, "Posted")]
+
+    CONDITION_GOOD = "good"
+    CONDITION_DAMAGED = "damaged"
+    CONDITION_CHOICES = [(CONDITION_GOOD, "Good"), (CONDITION_DAMAGED, "Damaged")]
+
+    number = models.PositiveIntegerField()
+    date = models.DateField()
+    store = models.ForeignKey(Store, on_delete=models.PROTECT, related_name="returns")
+    returned_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="+")
+    linked_issue = models.ForeignKey(
+        Issue, on_delete=models.PROTECT, null=True, blank=True, related_name="returns"
+    )
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default=STATUS_DRAFT)
+
+    class Meta:
+        ordering = ["store", "number"]
+        constraints = [
+            models.UniqueConstraint(fields=["store", "number"], name="unique_return_number_per_store")
+        ]
+
+    def __str__(self):
+        return f"Return {self.number} — {self.store.code}"
+
+    @property
+    def is_editable(self):
+        return self.status == self.STATUS_DRAFT
+
+    def post(self, user):
+        """
+        Adds stock back, at the average cost the store is currently
+        carrying for that item (there's no "cost it was issued at"
+        recorded anywhere useful to recover, since Section 5.1 doesn't
+        track that on the Issue itself) -- a disclosed simplification,
+        same spirit as everywhere else the average-cost method is used.
+        Damaged-condition lines still restore quantity (the physical
+        item is back in the store); a real system might value those at
+        zero or write them off separately, which is future work.
+        """
+        if self.status != self.STATUS_DRAFT:
+            raise ValidationError("Only a Draft return can be posted.")
+        lines = list(self.lines.select_related("item"))
+        if not lines:
+            raise ValidationError("A return needs at least one line before it can be posted.")
+        with transaction.atomic():
+            for line in lines:
+                _, _, average_cost = StockMovement.current_balance(self.store, line.item)
+                StockMovement.objects.create(
+                    store=self.store,
+                    item=line.item,
+                    quantity=line.quantity,
+                    unit_cost=average_cost,
+                    document_type=StockMovement.DOCUMENT_RETURN,
+                    document_id=self.pk,
+                    boq_item_id=line.boq_item_id,
+                    created_by=user,
+                )
+            self.status = self.STATUS_POSTED
+            self.save()
+
+
+class ReturnLine(models.Model):
+    ret = models.ForeignKey(ReturnToStore, on_delete=models.CASCADE, related_name="lines")
+    item = models.ForeignKey(StoreItem, on_delete=models.PROTECT, related_name="+")
+    quantity = models.DecimalField(max_digits=14, decimal_places=3)
+    condition = models.CharField(
+        max_length=10, choices=ReturnToStore.CONDITION_CHOICES, default=ReturnToStore.CONDITION_GOOD
+    )
+    boq_item = models.ForeignKey(
+        "boq.BOQItem", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+
+    class Meta:
+        ordering = ["pk"]
+
+    def __str__(self):
+        return f"{self.item.code} x{self.quantity} ({self.condition})"

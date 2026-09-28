@@ -12,7 +12,7 @@ store rather than every store on the project.
 """
 
 from core.permissions import get_role, user_can_access_project
-from core.models import ROLE_STOREKEEPER
+from core.models import ROLE_PROJECT_MANAGER, ROLE_SITE_ENGINEER, ROLE_STOREKEEPER
 
 
 def can_view_store_module(user, project):
@@ -44,3 +44,21 @@ def can_manage_grn(user, store):
     assigns exactly one.
     """
     return user.is_superuser or store.storekeeper_id == user.id
+
+
+# Issuing and returning are also store-specific storekeeper actions —
+# Section 2's "Issue materials to site" row is Storekeeper-only, same
+# shape as "Record goods received (GRN)".
+can_manage_issue = can_manage_grn
+can_manage_return = can_manage_grn
+
+
+# Section 2's "Request materials (store requisition)" row: Project
+# Manager and Site Engineer only (not QS, not Storekeeper).
+_REQUISITION_ROLES = {ROLE_PROJECT_MANAGER, ROLE_SITE_ENGINEER}
+
+
+def can_create_requisition(user, project):
+    if user.is_superuser:
+        return True
+    return get_role(user, project) in _REQUISITION_ROLES

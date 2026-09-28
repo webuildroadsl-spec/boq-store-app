@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+
+{% block title %}Returns — {{ store.code }}{% endblock %}
+
+{% block content %}
+<p><a href="{% url 'store:store_detail' project.pk store.pk %}">&larr; {{ store.code }}</a></p>
+<h1>Returns to store — {{ store.code }}</h1>
+
+<table border="1" cellpadding="4">
+    <thead>
+        <tr><th>Return</th><th>Date</th><th>Linked issue</th><th>Returned by</th><th>Status</th></tr>
+    </thead>
+    <tbody>
+        {% for ret in returns %}
+        <tr>
+            <td><a href="{% url 'store:return_detail' project.pk store.pk ret.pk %}">{{ ret.number }}</a></td>
+            <td>{{ ret.date }}</td>
+            <td>{{ ret.linked_issue|default:"—" }}</td>
+            <td>{{ ret.returned_by }}</td>
+            <td>{{ ret.get_status_display }}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="5">No returns recorded yet.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+{% if can_manage %}
+<p><a href="{% url 'store:return_create' project.pk store.pk %}">Record a return</a></p>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+
+{% block title %}Return {{ ret.number }} — {{ store.code }}{% endblock %}
+
+{% block content %}
+<p><a href="{% url 'store:return_list' project.pk store.pk %}">&larr; Returns — {{ store.code }}</a></p>
+<h1>Return {{ ret.number }} — {{ store.code }} ({{ ret.get_status_display }})</h1>
+
+<dl>
+    <dt>Date</dt><dd>{{ ret.date }}</dd>
+    <dt>Linked issue</dt><dd>{{ ret.linked_issue|default:"—" }}</dd>
+    <dt>Returned by</dt><dd>{{ ret.returned_by }}</dd>
+</dl>
+
+<h2>Lines</h2>
+<table border="1" cellpadding="4">
+    <thead>
+        <tr><th>Item</th><th>Quantity</th><th>Condition</th><th>BOQ item</th><th></th></tr>
+    </thead>
+    <tbody>
+        {% for line in lines %}
+        <tr>
+            <td>{{ line.item.code }} — {{ line.item.name }}</td>
+            <td>{{ line.quantity }} {{ line.item.unit.code }}</td>
+            <td>{{ line.get_condition_display }}</td>
+            <td>{{ line.boq_item|default:"—" }}</td>
+            <td>
+                {% if can_manage and ret.is_editable %}
+                <form method="post" action="{% url 'store:return_line_delete' project.pk store.pk ret.pk line.pk %}">
+                    {% csrf_token %}
+                    <button type="submit">Remove</button>
+                </form>
+                {% endif %}
+            </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="5">No lines yet.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+{% if can_manage and ret.is_editable %}
+<h2>Add a line</h2>
+<form method="post">
+    {% csrf_token %}
+    {{ line_form.as_p }}
+    <button type="submit">Add line</button>
+</form>
+
+<h2>Post this return</h2>
+<p>Posting adds stock back to {{ store.code }} at the store's current average cost — there is no record of
+    the cost an item was originally issued at, so the current average is used instead — and locks this return.</p>
+<form method="post" action="{% url 'store:return_post' project.pk store.pk ret.pk %}">
+    {% csrf_token %}
+    <button type="submit" {% if not lines %}disabled{% endif %}>Post return</button>
+</form>
+{% endif %}
+{% endblock %}

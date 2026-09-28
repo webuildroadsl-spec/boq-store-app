@@ -9,6 +9,8 @@
     <a href="{% url 'boq:boq_detail' project.pk %}">BOQ</a>
     &nbsp;|&nbsp;
     <a href="{% url 'store:store_list' project.pk %}">Stores</a>
+    &nbsp;|&nbsp;
+    <a href="{% url 'store:requisition_list' project.pk %}">Requisitions</a>
 </p>
 <dl>
     <dt>Client</dt><dd>{{ project.client|default:"—" }}</dd>

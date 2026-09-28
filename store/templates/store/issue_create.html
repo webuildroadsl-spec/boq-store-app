@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+
+{% block title %}Issue materials — {{ store.code }}{% endblock %}
+
+{% block content %}
+<p><a href="{% url 'store:issue_list' project.pk store.pk %}">&larr; Issues — {{ store.code }}</a></p>
+<h1>Issue materials — {{ store.code }}</h1>
+
+<form method="post">
+    {% csrf_token %}
+    {{ form.as_p }}
+    <button type="submit">Create as Draft</button>
+</form>
+{% endblock %}

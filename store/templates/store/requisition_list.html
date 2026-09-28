@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+
+{% block title %}Requisitions — {{ project.code }}{% endblock %}
+
+{% block content %}
+<p><a href="{% url 'core:project_detail' project.pk %}">&larr; {{ project.code }}</a></p>
+<h1>Store requisitions — {{ project.code }}</h1>
+
+<table border="1" cellpadding="4">
+    <thead>
+        <tr><th>Requisition</th><th>Date</th><th>Section</th><th>Requested by</th><th>Status</th></tr>
+    </thead>
+    <tbody>
+        {% for requisition in requisitions %}
+        <tr>
+            <td><a href="{% url 'store:requisition_detail' project.pk requisition.pk %}">{{ requisition.number }}</a></td>
+            <td>{{ requisition.date }}</td>
+            <td>{{ requisition.section|default:"—" }}</td>
+            <td>{{ requisition.requested_by }}</td>
+            <td>{{ requisition.get_status_display }}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="5">No requisitions recorded yet.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+{% if can_create %}
+<p><a href="{% url 'store:requisition_create' project.pk %}">Request materials</a></p>
+{% endif %}
+{% endblock %}
