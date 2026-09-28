@@ -1,53 +1,22 @@
 {% extends "base.html" %}
+{% load static %}
 
 {% block title %}Bill {{ bill.number }} — {{ project.code }}{% endblock %}
 
 {% block content %}
 <p><a href="{% url 'boq:boq_detail' project.pk %}">&larr; BOQ</a></p>
 <h1>Bill {{ bill.number }}: {{ bill.title }}</h1>
-<p>Bill total: <strong>{{ bill.total }}</strong></p>
+<p>Bill total: <strong id="bill-total">{{ bill.total }}</strong></p>
 
 {% if can_edit %}
-<form method="post">
-    {% csrf_token %}
-    {{ formset.management_form }}
-    <table border="1" cellpadding="4">
-        <thead>
-            <tr>
-                <th>Ref</th>
-                <th>Description</th>
-                <th>Type</th>
-                <th>Unit</th>
-                <th>Quantity</th>
-                <th>Rate</th>
-                <th>Section</th>
-                <th>Parent (heading)</th>
-                <th>Sort</th>
-                <th>Delete</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for form in formset %}
-            <tr>
-                <td>{{ form.item_reference }}{{ form.id }}</td>
-                <td>{{ form.description }}</td>
-                <td>{{ form.item_type }}</td>
-                <td>{{ form.unit }}</td>
-                <td>{{ form.quantity }}</td>
-                <td>{{ form.rate }}</td>
-                <td>{{ form.section }}</td>
-                <td>{{ form.parent_item }}</td>
-                <td>{{ form.sort_order }}</td>
-                <td>{% if form.instance.pk %}{{ form.DELETE }}{% endif %}</td>
-            </tr>
-            {% if form.non_field_errors or form.errors %}
-            <tr><td colspan="10">{{ form.non_field_errors }}{{ form.errors }}</td></tr>
-            {% endif %}
-            {% endfor %}
-        </tbody>
-    </table>
-    <button type="submit">Save</button>
-</form>
+{% csrf_token %}
+<div id="grid-status" role="status"></div>
+<div id="boq-grid"></div>
+<button type="button" id="add-row-btn">Add row</button>
+<button type="button" id="save-grid-btn">Save</button>
+
+<script id="grid-data" type="application/json">{{ grid_data_json|safe }}</script>
+<script src="{% static 'boq/grid.js' %}" defer></script>
 {% else %}
 <table border="1" cellpadding="4">
     <thead>

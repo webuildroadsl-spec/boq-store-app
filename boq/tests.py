@@ -1,3 +1,4 @@
+import json
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
@@ -186,8 +187,16 @@ class BOQAccessTests(TestCase):
         self.assertEqual(boq.bills.first().title, "General Items")
 
 
-class BOQItemFormSetTests(TestCase):
-    """Rule 3 and the manual-entry grid (bill_items view)."""
+class BillItemsSaveTests(TestCase):
+    """
+    Rule 3 and the manual-entry grid's backing API (bill_items_save).
+
+    The grid itself is a browser-side JS file (boq/static/boq/grid.js)
+    that this test suite can't execute — there's no headless browser in
+    this environment. What's tested here is the contract it depends on:
+    the JSON endpoint that validates and saves a whole bill's rows in
+    one request, using the same BOQItemForm the old formset used.
+    """
 
     def setUp(self):
         self.company = Company.objects.create(name="Test Contractor Ltd")
@@ -199,57 +208,61 @@ class BOQItemFormSetTests(TestCase):
         self.boq = BOQ.objects.create(project=self.project, version_number=1)
         self.bill = Bill.objects.create(boq=self.boq, number=4, title="Sub-base and Base")
         self.m3 = UnitOfMeasure.objects.get(code="m³")
+        self.save_url = reverse("boq:bill_items_save", args=[self.project.pk, self.bill.pk])
 
-    def _formset_post_data(self, rows, total_forms=3):
-        """
-        Builds POST data the way a real browser would: every rendered
-        row's fields are present, even ones the user left untouched
-        (they just carry their blank/default values, e.g. sort_order=0).
-        """
-        data = {
-            "items-TOTAL_FORMS": str(total_forms),
-            "items-INITIAL_FORMS": "0",
-            "items-MIN_NUM_FORMS": "0",
-            "items-MAX_NUM_FORMS": "1000",
-        }
-        blank_row = {
-            "item_reference": "",
-            "description": "",
-            "item_type": "",
-            "unit": "",
-            "quantity": "",
-            "rate": "",
-            "section": "",
-            "parent_item": "",
-            "sort_order": "0",
-        }
-        for i in range(total_forms):
-            row = blank_row | (rows[i] if i < len(rows) else {})
-            for key, value in row.items():
-                data[f"items-{i}-{key}"] = value
-        return data
+    def _post(self, rows):
+        return self.client.post(
+            self.save_url, data=json.dumps({"rows": rows}), content_type="application/json"
+        )
 
-    def test_adding_item_via_grid_computes_amount_and_bill_total(self):
-        url = reverse("boq:bill_items", args=[self.project.pk, self.bill.pk])
-        data = self._formset_post_data(
+    def test_grid_page_loads_with_embedded_json(self):
+        response = self.client.get(reverse("boq:bill_items", args=[self.project.pk, self.bill.pk]))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'id="grid-data"')
+        self.assertContains(response, self.save_url)
+
+    def test_adding_item_via_json_api_computes_amount_and_bill_total(self):
+        response = self._post(
             [
                 {
+                    "id": None,
                     "item_reference": "4.02",
                     "description": "Sub-base, 150mm compacted",
                     "item_type": BOQItem.TYPE_MEASURED,
                     "unit": self.m3.pk,
                     "quantity": "1250.500",
                     "rate": "185.00",
-                    "sort_order": "0",
+                    "sort_order": 0,
                 }
             ]
         )
-        response = self.client.post(url, data)
-        self.assertEqual(response.status_code, 302, response.context["formset"].errors if response.status_code == 200 else "")
+        self.assertEqual(response.status_code, 200, response.content)
+        body = response.json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["bill_total"], "231342.50")
         item = BOQItem.objects.get(item_reference="4.02")
         self.assertEqual(item.amount, Decimal("231342.50"))
         self.bill.refresh_from_db()
         self.assertEqual(self.bill.total, Decimal("231342.50"))
+
+    def test_a_wholly_blank_new_row_is_silently_skipped(self):
+        response = self._post(
+            [
+                {
+                    "id": None,
+                    "item_reference": "",
+                    "description": "",
+                    "item_type": "",
+                    "unit": None,
+                    "quantity": "",
+                    "rate": "",
+                    "sort_order": 0,
+                }
+            ]
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["ok"])
+        self.assertEqual(BOQItem.objects.count(), 0)
 
     def test_duplicate_item_reference_in_same_boq_is_rejected(self):
         BOQItem.objects.create(
@@ -261,20 +274,110 @@ class BOQItemFormSetTests(TestCase):
             quantity=Decimal("10.000"),
             rate=Decimal("5.00"),
         )
-        url = reverse("boq:bill_items", args=[self.project.pk, self.bill.pk])
-        data = self._formset_post_data(
+        response = self._post(
             [
                 {
+                    "id": None,
                     "item_reference": "4.02",
                     "description": "Duplicate reference",
                     "item_type": BOQItem.TYPE_MEASURED,
                     "unit": self.m3.pk,
                     "quantity": "1.000",
                     "rate": "1.00",
-                    "sort_order": "0",
+                    "sort_order": 0,
                 }
             ]
         )
-        response = self.client.post(url, data)
-        self.assertEqual(response.status_code, 200)  # re-rendered with errors
+        self.assertEqual(response.status_code, 400)
+        body = response.json()
+        self.assertFalse(body["ok"])
+        self.assertIn("item_reference", body["errors"]["0"])
         self.assertEqual(BOQItem.objects.filter(item_reference="4.02").count(), 1)
+
+    def test_editing_an_existing_item_recomputes_amount(self):
+        item = BOQItem.objects.create(
+            bill=self.bill,
+            item_reference="4.02",
+            description="Sub-base",
+            item_type=BOQItem.TYPE_MEASURED,
+            unit=self.m3,
+            quantity=Decimal("10.000"),
+            rate=Decimal("100.00"),
+        )
+        response = self._post(
+            [
+                {
+                    "id": item.pk,
+                    "item_reference": "4.02",
+                    "description": "Sub-base",
+                    "item_type": BOQItem.TYPE_MEASURED,
+                    "unit": self.m3.pk,
+                    "quantity": "20.000",
+                    "rate": "100.00",
+                    "sort_order": 0,
+                }
+            ]
+        )
+        self.assertEqual(response.status_code, 200)
+        item.refresh_from_db()
+        self.assertEqual(item.amount, Decimal("2000.00"))
+
+    def test_deleting_a_row_removes_the_item(self):
+        item = BOQItem.objects.create(
+            bill=self.bill,
+            item_reference="4.02",
+            description="Sub-base",
+            item_type=BOQItem.TYPE_MEASURED,
+            unit=self.m3,
+            quantity=Decimal("10.000"),
+            rate=Decimal("100.00"),
+        )
+        response = self._post([{"id": item.pk, "delete": True}])
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["ok"])
+        self.assertFalse(BOQItem.objects.filter(pk=item.pk).exists())
+
+    def test_an_id_from_another_bill_is_rejected(self):
+        other_bill = Bill.objects.create(boq=self.boq, number=1, title="General Items")
+        other_item = BOQItem.objects.create(
+            bill=other_bill,
+            item_reference="1.01",
+            description="Mobilisation",
+            item_type=BOQItem.TYPE_LUMP_SUM,
+            rate=Decimal("1000.00"),
+        )
+        response = self._post(
+            [
+                {
+                    "id": other_item.pk,
+                    "item_reference": "1.01",
+                    "description": "Tampered",
+                    "item_type": BOQItem.TYPE_LUMP_SUM,
+                    "rate": "1.00",
+                    "sort_order": 0,
+                }
+            ]
+        )
+        self.assertEqual(response.status_code, 400)
+        other_item.refresh_from_db()
+        self.assertEqual(other_item.description, "Mobilisation")
+
+    def test_viewer_cannot_post_to_the_save_endpoint(self):
+        viewer = User.objects.create_user(username="viewer2", password="a-strong-test-password-1")
+        ProjectMembership.objects.create(user=viewer, project=self.project, role=ROLE_VIEWER)
+        self.client.logout()
+        self.client.login(username="viewer2", password="a-strong-test-password-1")
+        response = self._post(
+            [
+                {
+                    "id": None,
+                    "item_reference": "1.01",
+                    "description": "Should be blocked",
+                    "item_type": BOQItem.TYPE_LUMP_SUM,
+                    "rate": "1.00",
+                    "sort_order": 0,
+                }
+            ]
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(BOQItem.objects.filter(item_reference="1.01").exists())

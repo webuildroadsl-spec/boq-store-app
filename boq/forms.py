@@ -1,5 +1,4 @@
 from django import forms
-from django.forms import inlineformset_factory
 
 from .models import BOQItem, Bill
 
@@ -12,14 +11,14 @@ class BillForm(forms.ModelForm):
 
 class BOQItemForm(forms.ModelForm):
     """
-    One row of the manual-entry grid.
+    Validates one row of the manual-entry grid (rules 1-3).
 
-    `boq` is passed in explicitly (rather than read off
-    `self.instance.bill.boq`) because for a brand-new row in the
-    formset, the parent `bill` foreign key isn't set on the instance
-    until after validation — so item-reference uniqueness (rule 3) has
-    to be checked against the BOQ the view already knows it's working
-    on, not against the not-yet-saved instance.
+    Used from `boq.views.bill_items_save`, once per row in the JSON
+    payload the JS grid posts. `boq` is passed in explicitly (rather
+    than read off `self.instance.bill.boq`) because a brand-new row has
+    no `bill` set on its instance until after validation — so
+    item-reference uniqueness (rule 3) is checked against the BOQ the
+    view already knows it's working on.
     """
 
     class Meta:
@@ -43,11 +42,9 @@ class BOQItemForm(forms.ModelForm):
     def __init__(self, *args, boq=None, **kwargs):
         self.boq = boq
         super().__init__(*args, **kwargs)
-        # A blank first option so a genuinely untouched extra grid row
-        # renders with nothing selected, matching its blank initial
-        # value — without this, browsers default to the first real
-        # choice, which would make an empty row look "changed" and
-        # trigger required-field errors on rows nobody filled in.
+        # A blank first option so a wholly-untouched row (item_type="")
+        # doesn't fail validation as "this field is required" before
+        # the view's own has_changed() check gets a chance to skip it.
         self.fields["item_type"].choices = [("", "---------")] + list(BOQItem.TYPE_CHOICES)
         if boq is not None:
             self.fields["parent_item"].queryset = BOQItem.objects.filter(
@@ -82,13 +79,3 @@ class BOQItemForm(forms.ModelForm):
                 self.add_error(None, "Quantity and rate are required for this item type.")
 
         return cleaned_data
-
-
-BOQItemFormSet = inlineformset_factory(
-    Bill,
-    BOQItem,
-    form=BOQItemForm,
-    fk_name="bill",
-    extra=3,
-    can_delete=True,
-)

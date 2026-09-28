@@ -11,4 +11,9 @@ urlpatterns = [
         views.bill_items,
         name="bill_items",
     ),
+    path(
+        "projects/<int:project_pk>/boq/bills/<int:bill_pk>/save/",
+        views.bill_items_save,
+        name="bill_items_save",
+    ),
 ]

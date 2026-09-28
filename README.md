@@ -54,8 +54,9 @@ python manage.py test
 - `core/` — Company, Project, Section, UnitOfMeasure and
   ProjectMembership models; project-scoped list/detail views; the
   `core.permissions` helpers everything else should filter through.
-- `boq/` — BOQ, Bill, BOQItem models; the manual entry grid
-  (`bill_items` view) and its per-role access rules.
+- `boq/` — BOQ, Bill, BOQItem models; `bill_items_save` (the JSON API
+  the grid saves to) and its per-role access rules;
+  `static/boq/grid.js` (the manual entry grid's front end).
 - `templates/` — project-wide templates (`base.html`,
   `registration/login.html`).
 - `docs/requirements.md` — the full requirements spec this build follows.
@@ -63,12 +64,32 @@ python manage.py test
 ## The BOQ manual entry grid (step 3)
 
 `/projects/<id>/boq/` shows the current BOQ's bills and their totals,
-and lets a QS (or an Admin/superuser) add bills. Each bill's `/bills/<id>/`
-page is the item grid itself: a Django formset renders one editable row
-per item plus a few blank rows to add more, and "Save" submits and
-recalculates everything server-side in one request.
+and lets a QS (or an Admin/superuser) add bills. Each bill's
+`/bills/<id>/` page is the item grid itself — a small dependency-free
+JavaScript spreadsheet-style table (`boq/static/boq/grid.js`) backed by
+a JSON API (`boq/views.bill_items_save`). The JS is UI only; every
+business rule below is still enforced in Django, through the same
+`BOQItemForm` that validates each row.
 
-What's implemented, matching Section 4's business rules:
+Grid UX:
+
+- Tab / Shift+Tab move through fields left-to-right, top-to-bottom
+  (native browser field order).
+- Arrow Up/Down move focus a row at a time in the same column; Arrow
+  Left/Right move a cell over once the text cursor is at that edge.
+- Enter moves down a row, adding a new blank one first if you're on the
+  last row.
+- Pasting a multi-cell block (e.g. copied out of Excel — tab-separated
+  columns, newline-separated rows) fills forward from the cell you
+  pasted into, adding rows as needed. Type and unit columns are matched
+  by their code/label text (e.g. pasting "m³" resolves to that unit).
+- "Add row" appends a blank row. A row's "✕" deletes it — instantly for
+  a row that was never saved, via one small request for a saved one.
+- Not attempted: cell range selection, multi-cell copy (paste only),
+  undo. This is a working spreadsheet-style entry tool, not a full
+  spreadsheet application.
+
+Business rules enforced server-side, on every save:
 
 - Rule 1 — amount = quantity × rate, rounded to 2 decimal places;
   headings carry no quantity, rate or amount.
@@ -76,19 +97,26 @@ What's implemented, matching Section 4's business rules:
   figure: quantity is forced to 1 and the unit to "sum", so what you
   type into "rate" *is* the amount.
 - Rule 3 — an item reference must be unique within the BOQ version;
-  the grid rejects a duplicate with a form error instead of saving it.
+  the API rejects a duplicate with a per-row error instead of saving it.
 - Section 2's "Create and edit BOQ" row — only a QS (or superuser) can
   add bills or edit items; Project Manager/Site Engineer/Viewer can look
   but not edit; a Storekeeper gets a 403 and can't see the BOQ at all.
+
+**Testing note:** there's no headless browser in this environment, so
+the JS itself isn't exercised by the automated test suite — only
+reviewed and checked for syntax errors. What *is* fully tested (19
+tests) is the JSON API it depends on: the same calculation, rule-3, and
+permission behavior as before, now posted as JSON instead of a Django
+form. It's also been exercised manually end-to-end over real HTTP
+(logging in, adding a bill, posting the exact payload the grid would
+send, reading the saved amount back) — see the commit message for the
+figures. If you can click through it in a real browser before step 4,
+that's worth doing; it hasn't been.
 
 What's *not* built yet, on purpose (later steps per Section 8): BOQ
 versions/approval/variation orders and "only one Approved version"
 (step 5), Excel import/export (step 4), the full bill summary with
 contingency/VAT (step 7's reporting), and material allowances (step 9).
-The grid also doesn't yet have the spreadsheet app's keyboard
-navigation or multi-cell copy/paste from Section 4.2 — it's a real,
-working multi-row entry form, but not a JS grid component. Worth a
-callout if that polish matters before step 4.
 
 ## How project access is scoped (step 2)
 
