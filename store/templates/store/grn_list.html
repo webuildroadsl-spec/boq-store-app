@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+
+{% block title %}GRNs — {{ store.code }}{% endblock %}
+
+{% block content %}
+<p><a href="{% url 'store:store_detail' project.pk store.pk %}">&larr; {{ store.code }}</a></p>
+<h1>Goods received notes — {{ store.code }}</h1>
+
+<table border="1" cellpadding="4">
+    <thead>
+        <tr><th>GRN</th><th>Date</th><th>Supplier</th><th>Status</th><th>Total value</th></tr>
+    </thead>
+    <tbody>
+        {% for grn in grns %}
+        <tr>
+            <td><a href="{% url 'store:grn_detail' project.pk store.pk grn.pk %}">{{ grn.number }}</a></td>
+            <td>{{ grn.date }}</td>
+            <td>{{ grn.supplier }}</td>
+            <td>{{ grn.get_status_display }}</td>
+            <td>{{ grn.total_value }}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="5">No GRNs recorded yet.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+{% if can_manage %}
+<p><a href="{% url 'store:grn_create' project.pk store.pk %}">Record a new GRN</a></p>
+{% endif %}
+{% endblock %}

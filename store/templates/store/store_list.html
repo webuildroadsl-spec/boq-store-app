@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% load store_extras %}
+
+{% block title %}Stores — {{ project.code }}{% endblock %}
+
+{% block content %}
+<p><a href="{% url 'core:project_detail' project.pk %}">&larr; {{ project.code }}</a></p>
+<h1>Stores — {{ project.code }}</h1>
+
+{% for store in stores %}
+<h2><a href="{% url 'store:store_detail' project.pk store.pk %}">{{ store.code }} — {{ store.name }}</a>
+    ({{ store.get_type_display }})</h2>
+<table border="1" cellpadding="4">
+    <thead>
+        <tr><th>Item</th><th>Quantity</th><th>Value</th><th>Average unit cost</th></tr>
+    </thead>
+    <tbody>
+        {% with rows=balances_by_store|get_item:store.pk %}
+        {% for row in rows %}
+        <tr>
+            <td>{{ row.item.code }} — {{ row.item.name }}</td>
+            <td>{{ row.quantity }} {{ row.item.unit.code }}</td>
+            <td>{{ row.value }}</td>
+            <td>{{ row.average_unit_cost }}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="4">No stock movements yet.</td></tr>
+        {% endfor %}
+        {% endwith %}
+    </tbody>
+</table>
+<p><a href="{% url 'store:grn_list' project.pk store.pk %}">GRNs at this store</a></p>
+{% empty %}
+<p>No stores visible to you on this project yet.</p>
+{% endfor %}
+{% endblock %}

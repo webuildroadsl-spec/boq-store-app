@@ -4,7 +4,7 @@ Django + PostgreSQL backend for the BOQ and Store modules described in
 [`docs/requirements.md`](docs/requirements.md). This repo is being built
 one step at a time from Section 8 of that spec.
 
-**Current status: Step 5 of 10** — BOQ versions, approval, variation orders, compare.
+**Current status: Step 6 of 10** — Store items, suppliers, stores; GRN.
 
 ## Setup (local development)
 
@@ -60,6 +60,11 @@ python manage.py test
   `static/boq/grid.js` (the manual entry grid's front end);
   `importer.py` (Excel import parsing/validation) and `exporter.py`
   (Excel/PDF export, and the import template download).
+- `store/` — Store, StoreItem, Supplier, ItemCategory, StockMovement,
+  GRN/GRNLine/GRNAttachment models; `StockMovement.current_balance()`
+  (the weighted-average stock formula); `GRN.post()`; the
+  `store.permissions` helpers (including the "Storekeeper sees only
+  their own store" scoping).
 - `templates/` — project-wide templates (`base.html`,
   `registration/login.html`).
 - `docs/requirements.md` — the full requirements spec this build follows.
@@ -267,6 +272,83 @@ a VO → add an item to it → approve it (confirmed the VO's status
 flipped to Approved and its value impact matched the added item's
 amount) → compare two versions (confirmed the diff and value
 difference matched what was actually changed).
+
+## Store items, suppliers, stores, and GRN (step 6)
+
+A project's stores live at `/projects/<id>/stores/` (linked from the
+project page). Item categories, store items, and suppliers are master/
+setup data managed through `/admin/`, the same way Company, Unit of
+measure and ProjectMembership already are — the spec doesn't ask for a
+bespoke screen to create them, just somewhere for them to live before
+a GRN can reference them.
+
+- **Stock balance is never stored, only computed.** Section 5's own
+  framing — "the stock balance is always calculated from those
+  movements, never typed in" — is implemented literally:
+  `StockMovement` is the only place a quantity or cost lives, and
+  `StockMovement.current_balance(store, item)` sums every movement's
+  signed quantity and its own `total_cost` to get
+  `(quantity, value, average_unit_cost)`. Because each movement
+  carries *its own* cost rather than a shared running figure, this one
+  formula is already the weighted-average calculation Section 8 asks
+  for: receiving 100 @ 150.00 then 100 @ 170.00 sums to 200 @ average
+  160.00, and — once step 7 adds issues, which will simply be another
+  `StockMovement` with a negative quantity at that same average cost —
+  issuing 50 will leave exactly 150 @ 160.00, value 24,000.00. Nothing
+  about this formula needs to change when issues arrive.
+- **GRN — record, then post.** Section 5.2: "the Storekeeper records a
+  delivery. Posting adds stock at the supplier's unit cost." A GRN
+  starts Draft (header fields, then lines added and removed freely,
+  plus file attachments up to 10 MB each), and `GRN.post(user)` is a
+  separate, explicit action: it creates one `StockMovement` per line
+  (all-or-nothing inside a transaction, same reasoning as the BOQ
+  Excel import), and locks the GRN — Section 2's rule "Posted
+  documents ... cannot be edited or deleted" is enforced at the view
+  level, since there's no reversing-document type to correct a mistake
+  with yet (issues/transfers/adjustments are steps 7-8; this gap is
+  intentional and disclosed, not silently missing).
+- **Who can do what.** "Record goods received (GRN)" (Section 2) is
+  Storekeeper-only, narrowed further here to *that store's own*
+  assigned storekeeper (`Store.storekeeper`, one person per store per
+  Section 5.1) rather than anyone with the Storekeeper role on the
+  project — `store.permissions.can_manage_grn`. Viewing is looser:
+  any project member can see a store's balance and GRN history, except
+  a Storekeeper is scoped to only the store(s) they're assigned to
+  (Section 2's "View reports and dashboards ... Storekeeper: Own
+  store") — `store.permissions.stores_for_user`. A store another
+  Storekeeper doesn't manage isn't just forbidden to them, it's not
+  shown at all (404, not 403) — same "don't confirm it exists" pattern
+  as everywhere else in this app.
+
+**The step 6 acceptance test** — "GRN of 200 bags cement at 150.00
+shows stock 200, value 30,000.00" — is a direct unit test
+(`store/tests.py`) and was also run manually end-to-end over real
+HTTP: logged in as the store's storekeeper, created a Draft GRN, added
+a 200 @ 150.00 line, posted it, and read the resulting stock balance
+page — it showed exactly `200.000 t` / `30000.00`, and a follow-up edit
+attempt on the now-Posted GRN correctly got a 403. Smoke-test data
+cleaned up afterward.
+
+**Tested:** `store/tests.py` — the acceptance test itself, the
+weighted-average test from Section 8 (both the receipt-only and the
+"issue 50 at the average cost" half, using a plain `StockMovement`
+directly since issuing isn't built yet), a zero-movements balance,
+and `GRN.post()`'s behavior (creates one movement per line, refuses to
+post with no lines, refuses to post twice, locks the GRN).
+`store/test_views.py` — the full create → add line → post flow over
+the test client, a blocked edit after posting, per-store GRN
+numbering (not global), and the visibility/permission rules above
+(a Storekeeper sees only their own store and gets a 404 for another
+one; a Viewer can see a GRN but not create one; a PM sees every
+store). 108 tests pass overall (88 existing + 20 new).
+
+**Not built** (deliberately, later steps per Section 8): requisition,
+issue, transfer, return and stock count (step 7-8) — so there's no way
+yet to *remove* stock, no reversing document to correct a posting
+mistake, and rule 6 ("an item with stock issued can't be deleted in a
+later BOQ version") still has nothing to enforce. Material allowances
+linking a BOQ item to a store item (step 9) don't exist yet either,
+so `StockMovement.boq_item` is wired up but nothing sets it.
 
 ## How project access is scoped (step 2)
 

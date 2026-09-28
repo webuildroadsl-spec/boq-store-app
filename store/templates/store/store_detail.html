@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+
+{% block title %}{{ store.code }} — {{ project.code }}{% endblock %}
+
+{% block content %}
+<p><a href="{% url 'store:store_list' project.pk %}">&larr; Stores — {{ project.code }}</a></p>
+<h1>{{ store.code }} — {{ store.name }} ({{ store.get_type_display }})</h1>
+<p>Storekeeper: {{ store.storekeeper }}</p>
+
+<h2>Stock balance</h2>
+<table border="1" cellpadding="4">
+    <thead>
+        <tr><th>Item</th><th>Quantity</th><th>Value</th><th>Average unit cost</th></tr>
+    </thead>
+    <tbody>
+        {% for row in rows %}
+        <tr>
+            <td>{{ row.item.code }} — {{ row.item.name }}</td>
+            <td>{{ row.quantity }} {{ row.item.unit.code }}</td>
+            <td>{{ row.value }}</td>
+            <td>{{ row.average_unit_cost }}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="4">No stock movements yet.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+<p><a href="{% url 'store:grn_list' project.pk store.pk %}">Goods received notes (GRN)</a></p>
+{% endblock %}
