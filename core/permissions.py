@@ -10,7 +10,13 @@ created), this MVP maps the spec's "Admin" onto Django's own
 Everyone else's access comes only from ProjectMembership rows.
 """
 
-from .models import Project
+from .models import (
+    ROLE_PROJECT_MANAGER,
+    ROLE_QS,
+    ROLE_SITE_ENGINEER,
+    ROLE_VIEWER,
+    Project,
+)
 
 
 def projects_for_user(user):
@@ -42,3 +48,23 @@ def get_role(user, project):
 def user_can_access_project(user, project):
     """True if `user` is allowed to see `project` at all."""
     return user.is_superuser or project.memberships.filter(user=user).exists()
+
+
+# Section 2's "Create and edit BOQ" row: Admin=Yes, Project Manager=View,
+# QS=Yes, Site Engineer=View, Storekeeper=No, Viewer=View. Storekeeper
+# isn't in either set below, so a Storekeeper who *is* a project member
+# still can't see the BOQ at all.
+_BOQ_VIEW_ROLES = {ROLE_PROJECT_MANAGER, ROLE_QS, ROLE_SITE_ENGINEER, ROLE_VIEWER}
+_BOQ_EDIT_ROLES = {ROLE_QS}
+
+
+def can_view_boq(user, project):
+    if user.is_superuser:
+        return True
+    return get_role(user, project) in _BOQ_VIEW_ROLES
+
+
+def can_edit_boq(user, project):
+    if user.is_superuser:
+        return True
+    return get_role(user, project) in _BOQ_EDIT_ROLES

@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+
+{% block title %}BOQ — {{ project.code }}{% endblock %}
+
+{% block content %}
+<p><a href="{% url 'core:project_detail' project.pk %}">&larr; {{ project.code }}</a></p>
+<h1>BOQ — {{ project.code }} (v{{ boq.version_number }}, {{ boq.get_status_display }})</h1>
+
+<table border="1" cellpadding="4">
+    <thead>
+        <tr>
+            <th>Bill</th>
+            <th>Title</th>
+            <th>Total</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for bill in bills %}
+        <tr>
+            <td>{{ bill.number }}</td>
+            <td><a href="{% url 'boq:bill_items' project.pk bill.pk %}">{{ bill.title }}</a></td>
+            <td>{{ bill.total }}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="3">No bills yet.</td></tr>
+        {% endfor %}
+    </tbody>
+    <tfoot>
+        <tr>
+            <th colspan="2">Grand total</th>
+            <th>{{ boq.grand_total }}</th>
+        </tr>
+    </tfoot>
+</table>
+
+{% if can_edit and boq.is_editable %}
+<h2>Add a bill</h2>
+<form method="post">
+    {% csrf_token %}
+    {{ bill_form.as_p }}
+    <button type="submit">Add bill</button>
+</form>
+{% endif %}
+{% endblock %}

@@ -4,8 +4,7 @@ Django + PostgreSQL backend for the BOQ and Store modules described in
 [`docs/requirements.md`](docs/requirements.md). This repo is being built
 one step at a time from Section 8 of that spec.
 
-**Current status: Step 2 of 10** — Company, project, section, unit,
-roles and permissions.
+**Current status: Step 3 of 10** — BOQ, bills, items; manual entry grid.
 
 ## Setup (local development)
 
@@ -55,9 +54,41 @@ python manage.py test
 - `core/` — Company, Project, Section, UnitOfMeasure and
   ProjectMembership models; project-scoped list/detail views; the
   `core.permissions` helpers everything else should filter through.
+- `boq/` — BOQ, Bill, BOQItem models; the manual entry grid
+  (`bill_items` view) and its per-role access rules.
 - `templates/` — project-wide templates (`base.html`,
   `registration/login.html`).
 - `docs/requirements.md` — the full requirements spec this build follows.
+
+## The BOQ manual entry grid (step 3)
+
+`/projects/<id>/boq/` shows the current BOQ's bills and their totals,
+and lets a QS (or an Admin/superuser) add bills. Each bill's `/bills/<id>/`
+page is the item grid itself: a Django formset renders one editable row
+per item plus a few blank rows to add more, and "Save" submits and
+recalculates everything server-side in one request.
+
+What's implemented, matching Section 4's business rules:
+
+- Rule 1 — amount = quantity × rate, rounded to 2 decimal places;
+  headings carry no quantity, rate or amount.
+- Rule 2 — Lump Sum and Provisional Sum items are entered as a single
+  figure: quantity is forced to 1 and the unit to "sum", so what you
+  type into "rate" *is* the amount.
+- Rule 3 — an item reference must be unique within the BOQ version;
+  the grid rejects a duplicate with a form error instead of saving it.
+- Section 2's "Create and edit BOQ" row — only a QS (or superuser) can
+  add bills or edit items; Project Manager/Site Engineer/Viewer can look
+  but not edit; a Storekeeper gets a 403 and can't see the BOQ at all.
+
+What's *not* built yet, on purpose (later steps per Section 8): BOQ
+versions/approval/variation orders and "only one Approved version"
+(step 5), Excel import/export (step 4), the full bill summary with
+contingency/VAT (step 7's reporting), and material allowances (step 9).
+The grid also doesn't yet have the spreadsheet app's keyboard
+navigation or multi-cell copy/paste from Section 4.2 — it's a real,
+working multi-row entry form, but not a JS grid component. Worth a
+callout if that polish matters before step 4.
 
 ## How project access is scoped (step 2)
 

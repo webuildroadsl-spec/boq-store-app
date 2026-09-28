@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+
+{% block title %}Bill {{ bill.number }} — {{ project.code }}{% endblock %}
+
+{% block content %}
+<p><a href="{% url 'boq:boq_detail' project.pk %}">&larr; BOQ</a></p>
+<h1>Bill {{ bill.number }}: {{ bill.title }}</h1>
+<p>Bill total: <strong>{{ bill.total }}</strong></p>
+
+{% if can_edit %}
+<form method="post">
+    {% csrf_token %}
+    {{ formset.management_form }}
+    <table border="1" cellpadding="4">
+        <thead>
+            <tr>
+                <th>Ref</th>
+                <th>Description</th>
+                <th>Type</th>
+                <th>Unit</th>
+                <th>Quantity</th>
+                <th>Rate</th>
+                <th>Section</th>
+                <th>Parent (heading)</th>
+                <th>Sort</th>
+                <th>Delete</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for form in formset %}
+            <tr>
+                <td>{{ form.item_reference }}{{ form.id }}</td>
+                <td>{{ form.description }}</td>
+                <td>{{ form.item_type }}</td>
+                <td>{{ form.unit }}</td>
+                <td>{{ form.quantity }}</td>
+                <td>{{ form.rate }}</td>
+                <td>{{ form.section }}</td>
+                <td>{{ form.parent_item }}</td>
+                <td>{{ form.sort_order }}</td>
+                <td>{% if form.instance.pk %}{{ form.DELETE }}{% endif %}</td>
+            </tr>
+            {% if form.non_field_errors or form.errors %}
+            <tr><td colspan="10">{{ form.non_field_errors }}{{ form.errors }}</td></tr>
+            {% endif %}
+            {% endfor %}
+        </tbody>
+    </table>
+    <button type="submit">Save</button>
+</form>
+{% else %}
+<table border="1" cellpadding="4">
+    <thead>
+        <tr>
+            <th>Ref</th>
+            <th>Description</th>
+            <th>Type</th>
+            <th>Unit</th>
+            <th>Quantity</th>
+            <th>Rate</th>
+            <th>Amount</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for item in bill.items.all %}
+        <tr>
+            <td>{{ item.item_reference }}</td>
+            <td>{{ item.description }}</td>
+            <td>{{ item.get_item_type_display }}</td>
+            <td>{{ item.unit }}</td>
+            <td>{{ item.quantity|default:"" }}</td>
+            <td>{{ item.rate|default:"" }}</td>
+            <td>{{ item.amount|default:"" }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+{% endblock %}

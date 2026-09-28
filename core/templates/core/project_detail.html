@@ -5,6 +5,7 @@
 {% block content %}
 <p><a href="{% url 'core:project_list' %}">&larr; All projects</a></p>
 <h1>{{ project.code }} — {{ project.name }}</h1>
+<p><a href="{% url 'boq:boq_detail' project.pk %}">BOQ</a></p>
 <dl>
     <dt>Client</dt><dd>{{ project.client|default:"—" }}</dd>
     <dt>Location</dt><dd>{{ project.location|default:"—" }}</dd>
