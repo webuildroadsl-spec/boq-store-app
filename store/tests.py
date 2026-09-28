@@ -6,6 +6,10 @@ documents ... cannot be edited or deleted").
 Step 7 (requisition, issue, return) model tests follow further down,
 covering the literal acceptance test: "Issuing 250 bags when stock is
 200 is blocked; issue without a BOQ item is blocked."
+
+Step 8 (transfer, stock count, reversal) tests follow after that,
+covering their own literal acceptance test: "Stock in transit counts
+in neither store; posted GRN cannot be edited."
 """
 
 from decimal import Decimal
@@ -20,17 +24,22 @@ from core.models import Company, Project, Section, UnitOfMeasure
 from .models import (
     GRN,
     GRNLine,
+    DocumentReversal,
     Issue,
     IssueLine,
     ItemCategory,
     RequisitionLine,
     ReturnLine,
     ReturnToStore,
+    StockCount,
+    StockCountLine,
     Store,
     StockMovement,
     StoreItem,
     StoreRequisition,
     Supplier,
+    Transfer,
+    TransferLine,
 )
 
 User = get_user_model()
@@ -313,3 +322,263 @@ class RequisitionIssueReturnTests(TestCase):
         with self.assertRaises(ValidationError):
             ret.post(self.user)
         self.assertEqual(ret.status, ReturnToStore.STATUS_DRAFT)
+
+
+class TransferTests(TestCase):
+    """
+    Step 8's acceptance test, at the model level: "Stock in transit
+    counts in neither store." A transfer's dispatch() removes stock
+    from `from_store` immediately; receive() is the only thing that
+    adds it to `to_store` -- so the balance formula excludes it from
+    both stores for free while it's in between.
+    """
+
+    def setUp(self):
+        company = Company.objects.create(name="Test Contractor Ltd")
+        self.project = Project.objects.create(company=company, code="STORE-4", name="Store test 4")
+        self.user = User.objects.create_user(username="storekeeper4", password="pw")
+        self.store_a = Store.objects.create(
+            project=self.project, code="A", name="Store A", storekeeper=self.user
+        )
+        self.store_b = Store.objects.create(
+            project=self.project, code="B", name="Store B", storekeeper=self.user
+        )
+        category = ItemCategory.objects.create(name="Cement and Binders")
+        self.item = StoreItem.objects.create(
+            code="CEM-01", name="Cement, 50kg bag", category=category, unit=UnitOfMeasure.objects.get(code="t")
+        )
+        StockMovement.objects.create(
+            store=self.store_a,
+            item=self.item,
+            quantity=Decimal("200"),
+            unit_cost=Decimal("150.00"),
+            document_type=StockMovement.DOCUMENT_GRN,
+            document_id=1,
+            created_by=self.user,
+        )
+
+    def _make_transfer(self):
+        return Transfer.objects.create(
+            number=1, date="2026-03-01", project=self.project, from_store=self.store_a, to_store=self.store_b
+        )
+
+    def test_stock_in_transit_counts_in_neither_store(self):
+        transfer = self._make_transfer()
+        TransferLine.objects.create(transfer=transfer, item=self.item, quantity=Decimal("80"))
+        transfer.dispatch(self.user)
+        transfer.refresh_from_db()
+        self.assertEqual(transfer.status, Transfer.STATUS_IN_TRANSIT)
+
+        a_quantity, _, _ = StockMovement.current_balance(self.store_a, self.item)
+        b_quantity, _, _ = StockMovement.current_balance(self.store_b, self.item)
+        self.assertEqual(a_quantity, Decimal("120.000"))  # left store A
+        self.assertEqual(b_quantity, Decimal("0.000"))  # not arrived at store B yet
+
+        transfer.receive(self.user)
+        transfer.refresh_from_db()
+        self.assertEqual(transfer.status, Transfer.STATUS_RECEIVED)
+        a_quantity, _, _ = StockMovement.current_balance(self.store_a, self.item)
+        b_quantity, _, b_average = StockMovement.current_balance(self.store_b, self.item)
+        self.assertEqual(a_quantity, Decimal("120.000"))
+        self.assertEqual(b_quantity, Decimal("80.000"))
+        self.assertEqual(b_average, Decimal("150.00"))  # arrives at the cost it left at
+
+    def test_dispatching_more_than_available_is_blocked(self):
+        transfer = self._make_transfer()
+        TransferLine.objects.create(transfer=transfer, item=self.item, quantity=Decimal("250"))
+        with self.assertRaises(ValidationError) as ctx:
+            transfer.dispatch(self.user)
+        self.assertIn("exceed", " ".join(ctx.exception.messages))
+        transfer.refresh_from_db()
+        self.assertEqual(transfer.status, Transfer.STATUS_DRAFT)
+
+    def test_cannot_transfer_a_store_to_itself(self):
+        transfer = Transfer(
+            number=2, date="2026-03-01", project=self.project, from_store=self.store_a, to_store=self.store_a
+        )
+        with self.assertRaises(ValidationError):
+            transfer.full_clean()
+
+    def test_cannot_receive_before_dispatch(self):
+        transfer = self._make_transfer()
+        TransferLine.objects.create(transfer=transfer, item=self.item, quantity=Decimal("50"))
+        with self.assertRaises(ValidationError):
+            transfer.receive(self.user)
+
+
+class StockCountTests(TestCase):
+    """Step 8's stock count: differences post as adjustments after
+    Project Manager approval (Section 5.2 point 6), and the approver
+    can never be the person who counted (Section 2)."""
+
+    def setUp(self):
+        company = Company.objects.create(name="Test Contractor Ltd")
+        self.project = Project.objects.create(company=company, code="STORE-5", name="Store test 5")
+        self.counter = User.objects.create_user(username="counter", password="pw")
+        self.pm = User.objects.create_user(username="pm_approver", password="pw")
+        self.store = Store.objects.create(
+            project=self.project, code="MAIN", name="Main yard", storekeeper=self.counter
+        )
+        category = ItemCategory.objects.create(name="Cement and Binders")
+        self.item = StoreItem.objects.create(
+            code="CEM-01", name="Cement, 50kg bag", category=category, unit=UnitOfMeasure.objects.get(code="t")
+        )
+        StockMovement.objects.create(
+            store=self.store,
+            item=self.item,
+            quantity=Decimal("200"),
+            unit_cost=Decimal("150.00"),
+            document_type=StockMovement.DOCUMENT_GRN,
+            document_id=1,
+            created_by=self.counter,
+        )
+
+    def test_shortage_posts_as_a_negative_adjustment(self):
+        stock_count = StockCount.objects.create(
+            number=1, date="2026-03-05", store=self.store, counted_by=self.counter
+        )
+        StockCountLine.objects.create(
+            stock_count=stock_count, item=self.item, system_quantity=Decimal("200"), counted_quantity=Decimal("190"),
+            reason="Spillage",
+        )
+        stock_count.submit()
+        stock_count.approve(self.pm)
+        stock_count.refresh_from_db()
+        self.assertEqual(stock_count.status, StockCount.STATUS_APPROVED)
+        self.assertEqual(stock_count.approved_by, self.pm)
+        quantity, _, _ = StockMovement.current_balance(self.store, self.item)
+        self.assertEqual(quantity, Decimal("190.000"))
+        movement = StockMovement.objects.get(document_type=StockMovement.DOCUMENT_ADJUSTMENT, document_id=stock_count.pk)
+        self.assertEqual(movement.quantity, Decimal("-10.000"))
+
+    def test_no_difference_posts_no_movement(self):
+        stock_count = StockCount.objects.create(
+            number=1, date="2026-03-05", store=self.store, counted_by=self.counter
+        )
+        StockCountLine.objects.create(
+            stock_count=stock_count, item=self.item, system_quantity=Decimal("200"), counted_quantity=Decimal("200")
+        )
+        stock_count.submit()
+        stock_count.approve(self.pm)
+        self.assertEqual(StockMovement.objects.filter(document_type=StockMovement.DOCUMENT_ADJUSTMENT).count(), 0)
+
+    def test_counter_cannot_approve_their_own_count(self):
+        stock_count = StockCount.objects.create(
+            number=1, date="2026-03-05", store=self.store, counted_by=self.counter
+        )
+        StockCountLine.objects.create(
+            stock_count=stock_count, item=self.item, system_quantity=Decimal("200"), counted_quantity=Decimal("190")
+        )
+        stock_count.submit()
+        with self.assertRaises(ValidationError):
+            stock_count.approve(self.counter)
+
+    def test_cannot_submit_an_empty_stock_count(self):
+        stock_count = StockCount.objects.create(
+            number=1, date="2026-03-05", store=self.store, counted_by=self.counter
+        )
+        with self.assertRaises(ValidationError):
+            stock_count.submit()
+
+
+class DocumentReversalTests(TestCase):
+    """
+    Step 8's other acceptance-test-adjacent rule: "posted GRN cannot
+    be edited" (already true since step 6) is joined by the
+    reversing-document mechanism Section 2 calls for as the actual
+    correction path.
+    """
+
+    def setUp(self):
+        company = Company.objects.create(name="Test Contractor Ltd")
+        self.project = Project.objects.create(company=company, code="STORE-6", name="Store test 6")
+        self.user = User.objects.create_user(username="storekeeper6", password="pw")
+        self.store = Store.objects.create(
+            project=self.project, code="MAIN", name="Main yard", storekeeper=self.user
+        )
+        category = ItemCategory.objects.create(name="Cement and Binders")
+        self.item = StoreItem.objects.create(
+            code="CEM-01", name="Cement, 50kg bag", category=category, unit=UnitOfMeasure.objects.get(code="t")
+        )
+        self.supplier = Supplier.objects.create(name="ACME Building Supplies")
+
+    def test_posted_grn_still_cannot_be_edited(self):
+        grn = GRN.objects.create(
+            number=1, date="2026-03-10", store=self.store, supplier=self.supplier, received_by=self.user
+        )
+        GRNLine.objects.create(grn=grn, item=self.item, quantity=Decimal("200"), unit_cost=Decimal("150.00"))
+        grn.post(self.user)
+        self.assertFalse(grn.is_editable)
+        # is_editable is the model-level flag the view layer checks
+        # before allowing any edit (see test_views.py's
+        # test_cannot_edit_a_posted_grn, from step 6) -- the
+        # correction path for a mistake here is a reversal:
+        reversal = grn.reverse(self.user, "Wrong quantity delivered")
+        self.assertIsInstance(reversal, DocumentReversal)
+        quantity, value, _ = StockMovement.current_balance(self.store, self.item)
+        self.assertEqual(quantity, Decimal("0.000"))
+        self.assertEqual(value, Decimal("0.00"))
+        self.assertTrue(grn.is_reversed)
+        self.assertEqual(grn.status, GRN.STATUS_POSTED)  # the original document itself is untouched
+
+    def test_cannot_reverse_the_same_document_twice(self):
+        grn = GRN.objects.create(
+            number=1, date="2026-03-10", store=self.store, supplier=self.supplier, received_by=self.user
+        )
+        GRNLine.objects.create(grn=grn, item=self.item, quantity=Decimal("200"), unit_cost=Decimal("150.00"))
+        grn.post(self.user)
+        grn.reverse(self.user, "Wrong quantity delivered")
+        with self.assertRaises(ValidationError):
+            grn.reverse(self.user, "Trying again")
+
+    def test_cannot_reverse_a_draft_document(self):
+        grn = GRN.objects.create(
+            number=1, date="2026-03-10", store=self.store, supplier=self.supplier, received_by=self.user
+        )
+        with self.assertRaises(ValidationError):
+            grn.reverse(self.user, "Nothing posted yet")
+
+    def test_reversing_a_grn_is_blocked_if_stock_has_moved_on(self):
+        grn = GRN.objects.create(
+            number=1, date="2026-03-10", store=self.store, supplier=self.supplier, received_by=self.user
+        )
+        GRNLine.objects.create(grn=grn, item=self.item, quantity=Decimal("200"), unit_cost=Decimal("150.00"))
+        grn.post(self.user)
+        # Issue away most of what the GRN delivered.
+        issue = Issue.objects.create(number=1, date="2026-03-11", store=self.store, issued_to="Site crew")
+        boq = BOQ.objects.create(project=self.project, version_number=1, status=BOQ.STATUS_APPROVED)
+        bill = Bill.objects.create(boq=boq, number=1, title="Earthworks")
+        boq_item = BOQItem.objects.create(
+            bill=bill, item_reference="1.01", description="Supply and lay cement",
+            item_type=BOQItem.TYPE_MEASURED, unit=UnitOfMeasure.objects.get(code="t"),
+            quantity=Decimal("1000"), rate=Decimal("10.00"),
+        )
+        IssueLine.objects.create(issue=issue, item=self.item, quantity=Decimal("180"), boq_item=boq_item)
+        issue.post(self.user)
+        # Only 20 t left -- reversing the 200 t GRN would take stock to -180.
+        with self.assertRaises(ValidationError) as ctx:
+            grn.reverse(self.user, "Wrong quantity delivered")
+        self.assertIn("negative", " ".join(ctx.exception.messages))
+
+    def test_reversing_an_issue_restores_stock(self):
+        grn = GRN.objects.create(
+            number=1, date="2026-03-10", store=self.store, supplier=self.supplier, received_by=self.user
+        )
+        GRNLine.objects.create(grn=grn, item=self.item, quantity=Decimal("200"), unit_cost=Decimal("150.00"))
+        grn.post(self.user)
+        boq = BOQ.objects.create(project=self.project, version_number=1, status=BOQ.STATUS_APPROVED)
+        bill = Bill.objects.create(boq=boq, number=1, title="Earthworks")
+        boq_item = BOQItem.objects.create(
+            bill=bill, item_reference="1.01", description="Supply and lay cement",
+            item_type=BOQItem.TYPE_MEASURED, unit=UnitOfMeasure.objects.get(code="t"),
+            quantity=Decimal("1000"), rate=Decimal("10.00"),
+        )
+        issue = Issue.objects.create(number=1, date="2026-03-11", store=self.store, issued_to="Site crew")
+        IssueLine.objects.create(issue=issue, item=self.item, quantity=Decimal("50"), boq_item=boq_item)
+        issue.post(self.user)
+        quantity, _, _ = StockMovement.current_balance(self.store, self.item)
+        self.assertEqual(quantity, Decimal("150.000"))
+
+        issue.reverse(self.user, "Issued to the wrong site")
+        quantity, _, _ = StockMovement.current_balance(self.store, self.item)
+        self.assertEqual(quantity, Decimal("200.000"))

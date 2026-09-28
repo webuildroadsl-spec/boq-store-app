@@ -32,5 +32,7 @@
     <a href="{% url 'store:issue_list' project.pk store.pk %}">Issues</a>
     &nbsp;|&nbsp;
     <a href="{% url 'store:return_list' project.pk store.pk %}">Returns</a>
+    &nbsp;|&nbsp;
+    <a href="{% url 'store:stock_count_list' project.pk store.pk %}">Stock counts</a>
 </p>
 {% endblock %}

@@ -62,3 +62,65 @@ def can_create_requisition(user, project):
     if user.is_superuser:
         return True
     return get_role(user, project) in _REQUISITION_ROLES
+
+
+# Section 2's "Transfers between stores" row: Storekeeper "Yes",
+# Project Manager "Approve". Unlike Stock count, the data model gives
+# Transfer no separate "approved by" field (5.1's field list is just
+# "dispatched by, received by"), so there's no distinct approval step
+# to gate here -- "Approve" is read as the Project Manager also
+# having full operational access (dispatch/receive), on top of each
+# store's own storekeeper, rather than a workflow the storekeeper must
+# wait on. This is a disclosed interpretation, not a literal field.
+def can_dispatch_transfer(user, transfer):
+    """Dispatching removes stock from `from_store`, so it's gated the
+    same way GRN/issue posting is: that store's own storekeeper, a
+    project's Project Manager, or a superuser."""
+    if user.is_superuser:
+        return True
+    if transfer.from_store.storekeeper_id == user.id:
+        return True
+    return get_role(user, transfer.project) == ROLE_PROJECT_MANAGER
+
+
+def can_receive_transfer(user, transfer):
+    """Receiving adds stock to `to_store` -- gated on *that* store's
+    storekeeper instead, since the two stores can have different
+    storekeepers and it's whoever is physically receiving the
+    delivery who should confirm it landed."""
+    if user.is_superuser:
+        return True
+    if transfer.to_store.storekeeper_id == user.id:
+        return True
+    return get_role(user, transfer.project) == ROLE_PROJECT_MANAGER
+
+
+def can_create_transfer(user, project, from_store):
+    """Creating (and later dispatching) a transfer starts from the
+    sending store, so it's gated the same way as dispatching."""
+    if user.is_superuser:
+        return True
+    if from_store.storekeeper_id == user.id:
+        return True
+    return get_role(user, project) == ROLE_PROJECT_MANAGER
+
+
+# Section 2's "Stock count and adjustment" row: Storekeeper "Yes"
+# (does the count), Project Manager "Approve" -- and this one *does*
+# match an explicit field ("approved by") and an explicit sentence
+# (5.2.6: "differences post as adjustments after Project Manager
+# approval"), so it's a real, distinct gate, unlike Transfer's.
+def can_manage_stock_count(user, store):
+    """Creating a stock count and entering counted quantities -- the
+    store's own storekeeper, same shape as GRN."""
+    return user.is_superuser or store.storekeeper_id == user.id
+
+
+def can_approve_stock_count(user, project):
+    """Approving (which posts the adjustment) is a Project Manager's
+    action -- Section 2's rule "No user can approve their own
+    adjustment" is enforced separately, in StockCount.approve()
+    itself, since it depends on *who counted*, not just the role."""
+    if user.is_superuser:
+        return True
+    return get_role(user, project) == ROLE_PROJECT_MANAGER

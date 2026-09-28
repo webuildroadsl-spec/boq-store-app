@@ -12,7 +12,11 @@ from .models import (
     RequisitionLine,
     ReturnLine,
     ReturnToStore,
+    StockCount,
+    StockCountLine,
     StoreRequisition,
+    Transfer,
+    TransferLine,
 )
 
 MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024  # Section 3: "max 10 MB each."
@@ -146,3 +150,70 @@ class ReturnLineForm(forms.ModelForm):
         self.fields["boq_item"].required = False
         if project is not None:
             self.fields["boq_item"].queryset = _boq_items_for_project(project)
+
+
+class TransferForm(forms.ModelForm):
+    class Meta:
+        model = Transfer
+        fields = ["date", "from_store", "to_store"]
+        widgets = {"date": forms.DateInput(attrs={"type": "date"})}
+
+    def __init__(self, *args, project=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if project is not None:
+            self.fields["from_store"].queryset = project.stores.all()
+            self.fields["to_store"].queryset = project.stores.all()
+
+    def clean(self):
+        cleaned_data = super().clean()
+        from_store = cleaned_data.get("from_store")
+        to_store = cleaned_data.get("to_store")
+        if from_store and to_store and from_store == to_store:
+            raise ValidationError("A transfer must be between two different stores.")
+        return cleaned_data
+
+
+class TransferLineForm(forms.ModelForm):
+    class Meta:
+        model = TransferLine
+        fields = ["item", "quantity"]
+        widgets = {"quantity": forms.NumberInput(attrs={"step": "0.001"})}
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["item"].queryset = self.fields["item"].queryset.filter(active=True)
+
+
+class StockCountForm(forms.ModelForm):
+    class Meta:
+        model = StockCount
+        fields = ["date"]
+        widgets = {"date": forms.DateInput(attrs={"type": "date"})}
+
+
+class StockCountLineForm(forms.ModelForm):
+    """
+    `system_quantity` isn't a form field — it's snapshotted from
+    `StockMovement.current_balance()` by the view when the line is
+    saved, the same way `IssueLine.section` or `RequisitionLine`'s
+    parent FK are set after `form.save(commit=False)` rather than
+    exposed for the user to type in.
+    """
+
+    class Meta:
+        model = StockCountLine
+        fields = ["item", "counted_quantity", "reason"]
+        widgets = {"counted_quantity": forms.NumberInput(attrs={"step": "0.001"})}
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["item"].queryset = self.fields["item"].queryset.filter(active=True)
+        self.fields["reason"].required = False
+
+
+class ReversalForm(forms.Form):
+    """A one-field form for the reason behind reversing a Posted GRN,
+    issue or return — see `DocumentReversal` (Section 2's "mistakes
+    are corrected with a reversing document")."""
+
+    reason = forms.CharField(max_length=255, widget=forms.TextInput(attrs={"size": 60}))

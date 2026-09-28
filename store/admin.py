@@ -4,17 +4,22 @@ from .models import (
     GRN,
     GRNAttachment,
     GRNLine,
+    DocumentReversal,
     Issue,
     IssueLine,
     ItemCategory,
     RequisitionLine,
     ReturnLine,
     ReturnToStore,
+    StockCount,
+    StockCountLine,
     Store,
     StockMovement,
     StoreItem,
     StoreRequisition,
     Supplier,
+    Transfer,
+    TransferLine,
 )
 
 
@@ -101,3 +106,33 @@ class ReturnToStoreAdmin(admin.ModelAdmin):
     list_display = ("store", "number", "date", "linked_issue", "returned_by", "status")
     list_filter = ("status", "store")
     inlines = [ReturnLineInline]
+
+
+class TransferLineInline(admin.TabularInline):
+    model = TransferLine
+    extra = 0
+
+
+@admin.register(Transfer)
+class TransferAdmin(admin.ModelAdmin):
+    list_display = ("project", "number", "date", "from_store", "to_store", "status")
+    list_filter = ("status", "project")
+    inlines = [TransferLineInline]
+
+
+class StockCountLineInline(admin.TabularInline):
+    model = StockCountLine
+    extra = 0
+
+
+@admin.register(StockCount)
+class StockCountAdmin(admin.ModelAdmin):
+    list_display = ("store", "number", "date", "counted_by", "approved_by", "status")
+    list_filter = ("status", "store")
+    inlines = [StockCountLineInline]
+
+
+@admin.register(DocumentReversal)
+class DocumentReversalAdmin(admin.ModelAdmin):
+    list_display = ("document_type", "document_id", "reversed_by", "created_at")
+    list_filter = ("document_type",)

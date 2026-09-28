@@ -57,4 +57,18 @@
     <button type="submit" {% if not lines %}disabled{% endif %}>Post issue</button>
 </form>
 {% endif %}
+
+{% if can_manage and not issue.is_editable %}
+    {% if issue.is_reversed %}
+    <p>This issue has already been reversed.</p>
+    {% else %}
+    <h2>Reverse this issue</h2>
+    <p>Reversing restores the stock this issue removed. Give a reason for the correction.</p>
+    <form method="post" action="{% url 'store:issue_reverse' project.pk store.pk issue.pk %}">
+        {% csrf_token %}
+        {{ reversal_form.as_p }}
+        <button type="submit">Reverse issue</button>
+    </form>
+    {% endif %}
+{% endif %}
 {% endblock %}

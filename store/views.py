@@ -19,13 +19,33 @@ from .forms import (
     RequisitionLineForm,
     ReturnForm,
     ReturnLineForm,
+    ReversalForm,
+    StockCountForm,
+    StockCountLineForm,
+    TransferForm,
+    TransferLineForm,
 )
-from .models import GRN, Issue, ReturnToStore, Store, StockMovement, StoreItem, StoreRequisition
+from .models import (
+    GRN,
+    Issue,
+    ReturnToStore,
+    StockCount,
+    StockMovement,
+    Store,
+    StoreItem,
+    StoreRequisition,
+    Transfer,
+)
 from .permissions import (
+    can_approve_stock_count,
     can_create_requisition,
+    can_create_transfer,
+    can_dispatch_transfer,
     can_manage_grn,
     can_manage_issue,
     can_manage_return,
+    can_manage_stock_count,
+    can_receive_transfer,
     can_view_store_module,
     stores_for_user,
 )
@@ -176,6 +196,7 @@ def grn_detail(request, project_pk, store_pk, grn_pk):
             "line_form": line_form,
             "attachment_form": attachment_form,
             "can_manage": can_manage,
+            "reversal_form": ReversalForm(),
         },
     )
 
@@ -209,6 +230,28 @@ def grn_post(request, project_pk, store_pk, grn_pk):
         messages.error(request, " ".join(exc.messages))
     else:
         messages.success(request, f"GRN {grn.number} posted. Stock at {store.code} has been updated.")
+    return redirect("store:grn_detail", project_pk=project.pk, store_pk=store.pk, grn_pk=grn.pk)
+
+
+@login_required
+@require_POST
+def grn_reverse(request, project_pk, store_pk, grn_pk):
+    project = _get_project_and_check_store_access(request, project_pk)
+    store = _get_store(request, project, store_pk)
+    grn = get_object_or_404(GRN, pk=grn_pk, store=store)
+    if not can_manage_grn(request.user, store):
+        raise PermissionDenied("Only this store's storekeeper can reverse this GRN.")
+    form = ReversalForm(request.POST)
+    if form.is_valid():
+        try:
+            grn.reverse(request.user, form.cleaned_data["reason"])
+        except ValidationError as exc:
+            for message in exc.messages:
+                messages.error(request, message)
+        else:
+            messages.success(request, f"GRN {grn.number} reversed. Stock at {store.code} has been updated.")
+    else:
+        messages.error(request, "A reason is required to reverse a document.")
     return redirect("store:grn_detail", project_pk=project.pk, store_pk=store.pk, grn_pk=grn.pk)
 
 
@@ -375,6 +418,7 @@ def issue_detail(request, project_pk, store_pk, issue_pk):
             "lines": issue.lines.select_related("item", "boq_item", "section"),
             "line_form": line_form,
             "can_manage": can_manage,
+            "reversal_form": ReversalForm(),
         },
     )
 
@@ -409,6 +453,28 @@ def issue_post(request, project_pk, store_pk, issue_pk):
             messages.error(request, message)
     else:
         messages.success(request, f"Issue {issue.number} posted. Stock at {store.code} has been updated.")
+    return redirect("store:issue_detail", project_pk=project.pk, store_pk=store.pk, issue_pk=issue.pk)
+
+
+@login_required
+@require_POST
+def issue_reverse(request, project_pk, store_pk, issue_pk):
+    project = _get_project_and_check_store_access(request, project_pk)
+    store = _get_store(request, project, store_pk)
+    issue = get_object_or_404(Issue, pk=issue_pk, store=store)
+    if not can_manage_issue(request.user, store):
+        raise PermissionDenied("Only this store's storekeeper can reverse this issue.")
+    form = ReversalForm(request.POST)
+    if form.is_valid():
+        try:
+            issue.reverse(request.user, form.cleaned_data["reason"])
+        except ValidationError as exc:
+            for message in exc.messages:
+                messages.error(request, message)
+        else:
+            messages.success(request, f"Issue {issue.number} reversed. Stock at {store.code} has been updated.")
+    else:
+        messages.error(request, "A reason is required to reverse a document.")
     return redirect("store:issue_detail", project_pk=project.pk, store_pk=store.pk, issue_pk=issue.pk)
 
 
@@ -486,6 +552,7 @@ def return_detail(request, project_pk, store_pk, return_pk):
             "lines": ret.lines.select_related("item", "boq_item"),
             "line_form": line_form,
             "can_manage": can_manage,
+            "reversal_form": ReversalForm(),
         },
     )
 
@@ -520,3 +587,271 @@ def return_post(request, project_pk, store_pk, return_pk):
     else:
         messages.success(request, f"Return {ret.number} posted. Stock at {store.code} has been updated.")
     return redirect("store:return_detail", project_pk=project.pk, store_pk=store.pk, return_pk=ret.pk)
+
+
+@login_required
+@require_POST
+def return_reverse(request, project_pk, store_pk, return_pk):
+    project = _get_project_and_check_store_access(request, project_pk)
+    store = _get_store(request, project, store_pk)
+    ret = get_object_or_404(ReturnToStore, pk=return_pk, store=store)
+    if not can_manage_return(request.user, store):
+        raise PermissionDenied("Only this store's storekeeper can reverse this return.")
+    form = ReversalForm(request.POST)
+    if form.is_valid():
+        try:
+            ret.reverse(request.user, form.cleaned_data["reason"])
+        except ValidationError as exc:
+            for message in exc.messages:
+                messages.error(request, message)
+        else:
+            messages.success(request, f"Return {ret.number} reversed. Stock at {store.code} has been updated.")
+    else:
+        messages.error(request, "A reason is required to reverse a document.")
+    return redirect("store:return_detail", project_pk=project.pk, store_pk=store.pk, return_pk=ret.pk)
+
+
+# ---------------------------------------------------------------------------
+# Transfer between stores (Section 5.2 point 4).
+# ---------------------------------------------------------------------------
+
+
+@login_required
+def transfer_list(request, project_pk):
+    project = _get_project_and_check_store_access(request, project_pk)
+    return render(
+        request,
+        "store/transfer_list.html",
+        {"project": project, "transfers": project.transfers.select_related("from_store", "to_store")},
+    )
+
+
+@login_required
+def transfer_create(request, project_pk):
+    project = _get_project_and_check_store_access(request, project_pk)
+
+    if request.method == "POST":
+        form = TransferForm(request.POST, project=project)
+        if form.is_valid():
+            from_store = form.cleaned_data["from_store"]
+            if not can_create_transfer(request.user, project, from_store):
+                raise PermissionDenied("Only the sending store's storekeeper can start a transfer.")
+            transfer = form.save(commit=False)
+            transfer.project = project
+            transfer.number = _next_number(project.transfers)
+            transfer.save()
+            return redirect("store:transfer_detail", project_pk=project.pk, transfer_pk=transfer.pk)
+    else:
+        form = TransferForm(project=project)
+
+    return render(request, "store/transfer_create.html", {"project": project, "form": form})
+
+
+@login_required
+def transfer_detail(request, project_pk, transfer_pk):
+    project = _get_project_and_check_store_access(request, project_pk)
+    transfer = get_object_or_404(Transfer, pk=transfer_pk, project=project)
+    can_dispatch = can_dispatch_transfer(request.user, transfer)
+    can_receive = can_receive_transfer(request.user, transfer)
+
+    if request.method == "POST":
+        if not can_dispatch:
+            raise PermissionDenied("Only the sending store's storekeeper can edit this transfer.")
+        if not transfer.is_editable:
+            raise PermissionDenied("A transfer can only have lines added while it's still a Draft.")
+        line_form = TransferLineForm(request.POST)
+        if line_form.is_valid():
+            line = line_form.save(commit=False)
+            line.transfer = transfer
+            line.save()
+            return redirect("store:transfer_detail", project_pk=project.pk, transfer_pk=transfer.pk)
+    else:
+        line_form = TransferLineForm()
+
+    return render(
+        request,
+        "store/transfer_detail.html",
+        {
+            "project": project,
+            "transfer": transfer,
+            "lines": transfer.lines.select_related("item"),
+            "line_form": line_form,
+            "can_dispatch": can_dispatch,
+            "can_receive": can_receive,
+        },
+    )
+
+
+@login_required
+@require_POST
+def transfer_line_delete(request, project_pk, transfer_pk, line_pk):
+    project = _get_project_and_check_store_access(request, project_pk)
+    transfer = get_object_or_404(Transfer, pk=transfer_pk, project=project)
+    if not can_dispatch_transfer(request.user, transfer):
+        raise PermissionDenied("Only the sending store's storekeeper can edit this transfer.")
+    if not transfer.is_editable:
+        raise PermissionDenied("A transfer can only have lines removed while it's still a Draft.")
+    line = get_object_or_404(transfer.lines, pk=line_pk)
+    line.delete()
+    return redirect("store:transfer_detail", project_pk=project.pk, transfer_pk=transfer.pk)
+
+
+@login_required
+@require_POST
+def transfer_dispatch(request, project_pk, transfer_pk):
+    project = _get_project_and_check_store_access(request, project_pk)
+    transfer = get_object_or_404(Transfer, pk=transfer_pk, project=project)
+    if not can_dispatch_transfer(request.user, transfer):
+        raise PermissionDenied("Only the sending store's storekeeper can dispatch this transfer.")
+    try:
+        transfer.dispatch(request.user)
+    except ValidationError as exc:
+        for message in exc.messages:
+            messages.error(request, message)
+    else:
+        messages.success(
+            request,
+            f"Transfer {transfer.number} dispatched. It is in transit and counts in neither store's stock "
+            f"until received.",
+        )
+    return redirect("store:transfer_detail", project_pk=project.pk, transfer_pk=transfer.pk)
+
+
+@login_required
+@require_POST
+def transfer_receive(request, project_pk, transfer_pk):
+    project = _get_project_and_check_store_access(request, project_pk)
+    transfer = get_object_or_404(Transfer, pk=transfer_pk, project=project)
+    if not can_receive_transfer(request.user, transfer):
+        raise PermissionDenied("Only the receiving store's storekeeper can receive this transfer.")
+    try:
+        transfer.receive(request.user)
+    except ValidationError as exc:
+        for message in exc.messages:
+            messages.error(request, message)
+    else:
+        messages.success(
+            request, f"Transfer {transfer.number} received. Stock at {transfer.to_store.code} has been updated."
+        )
+    return redirect("store:transfer_detail", project_pk=project.pk, transfer_pk=transfer.pk)
+
+
+# ---------------------------------------------------------------------------
+# Stock count (Section 5.2 point 6).
+# ---------------------------------------------------------------------------
+
+
+@login_required
+def stock_count_list(request, project_pk, store_pk):
+    project = _get_project_and_check_store_access(request, project_pk)
+    store = _get_store(request, project, store_pk)
+    return render(
+        request,
+        "store/stock_count_list.html",
+        {
+            "project": project,
+            "store": store,
+            "stock_counts": store.stock_counts.all(),
+            "can_manage": can_manage_stock_count(request.user, store),
+        },
+    )
+
+
+@login_required
+def stock_count_create(request, project_pk, store_pk):
+    project = _get_project_and_check_store_access(request, project_pk)
+    store = _get_store(request, project, store_pk)
+    if not can_manage_stock_count(request.user, store):
+        raise PermissionDenied("Only this store's storekeeper can start a stock count.")
+
+    if request.method == "POST":
+        form = StockCountForm(request.POST)
+        if form.is_valid():
+            stock_count = form.save(commit=False)
+            stock_count.store = store
+            stock_count.counted_by = request.user
+            stock_count.number = _next_number(store.stock_counts)
+            stock_count.save()
+            return redirect(
+                "store:stock_count_detail", project_pk=project.pk, store_pk=store.pk, stock_count_pk=stock_count.pk
+            )
+    else:
+        form = StockCountForm()
+
+    return render(request, "store/stock_count_create.html", {"project": project, "store": store, "form": form})
+
+
+@login_required
+def stock_count_detail(request, project_pk, store_pk, stock_count_pk):
+    project = _get_project_and_check_store_access(request, project_pk)
+    store = _get_store(request, project, store_pk)
+    stock_count = get_object_or_404(StockCount, pk=stock_count_pk, store=store)
+    can_manage = can_manage_stock_count(request.user, store)
+    can_approve = can_approve_stock_count(request.user, project)
+
+    if request.method == "POST":
+        if "submit" in request.POST:
+            if not can_manage:
+                raise PermissionDenied("Only this store's storekeeper can submit this stock count.")
+            try:
+                stock_count.submit()
+                messages.success(request, f"Stock count {stock_count.number} submitted for approval.")
+            except ValidationError as exc:
+                for message in exc.messages:
+                    messages.error(request, message)
+            return redirect(
+                "store:stock_count_detail", project_pk=project.pk, store_pk=store.pk, stock_count_pk=stock_count.pk
+            )
+
+        if not can_manage:
+            raise PermissionDenied("Only this store's storekeeper can add lines to this stock count.")
+        if not stock_count.is_editable:
+            raise PermissionDenied("A stock count can only have lines added while it's still a Draft.")
+        line_form = StockCountLineForm(request.POST)
+        if line_form.is_valid():
+            line = line_form.save(commit=False)
+            line.stock_count = stock_count
+            available, _, _ = StockMovement.current_balance(store, line.item)
+            line.system_quantity = available
+            line.save()
+            return redirect(
+                "store:stock_count_detail", project_pk=project.pk, store_pk=store.pk, stock_count_pk=stock_count.pk
+            )
+    else:
+        line_form = StockCountLineForm()
+
+    return render(
+        request,
+        "store/stock_count_detail.html",
+        {
+            "project": project,
+            "store": store,
+            "stock_count": stock_count,
+            "lines": stock_count.lines.select_related("item"),
+            "line_form": line_form,
+            "can_manage": can_manage,
+            "can_approve": can_approve,
+        },
+    )
+
+
+@login_required
+@require_POST
+def stock_count_approve(request, project_pk, store_pk, stock_count_pk):
+    project = _get_project_and_check_store_access(request, project_pk)
+    store = _get_store(request, project, store_pk)
+    stock_count = get_object_or_404(StockCount, pk=stock_count_pk, store=store)
+    if not can_approve_stock_count(request.user, project):
+        raise PermissionDenied("Only a Project Manager can approve a stock count.")
+    try:
+        stock_count.approve(request.user)
+    except ValidationError as exc:
+        for message in exc.messages:
+            messages.error(request, message)
+    else:
+        messages.success(
+            request, f"Stock count {stock_count.number} approved. Stock at {store.code} has been updated."
+        )
+    return redirect(
+        "store:stock_count_detail", project_pk=project.pk, store_pk=store.pk, stock_count_pk=stock_count.pk
+    )

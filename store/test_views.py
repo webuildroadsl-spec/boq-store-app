@@ -4,7 +4,8 @@ GRN through the Django test client, and the store-visibility scoping
 ("Own store" for a Storekeeper) from store.permissions.
 
 Step 7's view/permission tests (requisitions, issues, returns) follow
-further down.
+further down, and step 8's (transfer, stock count, reversal) after
+that.
 """
 
 from decimal import Decimal
@@ -32,11 +33,13 @@ from .models import (
     Issue,
     ItemCategory,
     ReturnToStore,
+    StockCount,
     Store,
     StockMovement,
     StoreItem,
     StoreRequisition,
     Supplier,
+    Transfer,
 )
 
 User = get_user_model()
@@ -405,3 +408,136 @@ class RequisitionIssueReturnViewsTestCase(TestCase):
         self.assertEqual(ret.status, ReturnToStore.STATUS_POSTED)
         quantity, _, _ = StockMovement.current_balance(self.store, self.item)
         self.assertEqual(quantity, Decimal("100.000"))
+
+
+class TransferStockCountReversalViewsTestCase(TestCase):
+    """Step 8's acceptance test over the Django test client: "Stock in
+    transit counts in neither store; posted GRN cannot be edited."
+    Plus stock count approval and GRN/issue reversal."""
+
+    def setUp(self):
+        company = Company.objects.create(name="Test Contractor Ltd")
+        self.project = Project.objects.create(company=company, code="STOREV-3", name="Store views test 3")
+
+        self.keeper = User.objects.create_user(username="keeper3", password="pw")
+        self.pm = User.objects.create_user(username="pm3", password="pw")
+        ProjectMembership.objects.create(user=self.keeper, project=self.project, role=ROLE_STOREKEEPER)
+        ProjectMembership.objects.create(user=self.pm, project=self.project, role=ROLE_PROJECT_MANAGER)
+
+        self.store_a = Store.objects.create(
+            project=self.project, code="A", name="Store A", storekeeper=self.keeper
+        )
+        self.store_b = Store.objects.create(
+            project=self.project, code="B", name="Store B", storekeeper=self.keeper
+        )
+        category = ItemCategory.objects.create(name="Cement and Binders")
+        self.item = StoreItem.objects.create(
+            code="CEM-01", name="Cement, 50kg bag", category=category, unit=UnitOfMeasure.objects.get(code="t")
+        )
+        self.supplier = Supplier.objects.create(name="ACME Building Supplies")
+
+        StockMovement.objects.create(
+            store=self.store_a,
+            item=self.item,
+            quantity=Decimal("200"),
+            unit_cost=Decimal("150.00"),
+            document_type=StockMovement.DOCUMENT_GRN,
+            document_id=1,
+            created_by=self.keeper,
+        )
+
+    def test_stock_in_transit_counts_in_neither_store_over_http(self):
+        self.client.force_login(self.keeper)
+        self.client.post(
+            reverse("store:transfer_create", args=[self.project.pk]),
+            {"date": "2026-03-01", "from_store": self.store_a.pk, "to_store": self.store_b.pk},
+        )
+        transfer = Transfer.objects.get(project=self.project)
+        self.client.post(
+            reverse("store:transfer_detail", args=[self.project.pk, transfer.pk]),
+            {"item": self.item.pk, "quantity": "80"},
+        )
+        self.client.post(reverse("store:transfer_dispatch", args=[self.project.pk, transfer.pk]))
+        transfer.refresh_from_db()
+        self.assertEqual(transfer.status, Transfer.STATUS_IN_TRANSIT)
+
+        a_quantity, _, _ = StockMovement.current_balance(self.store_a, self.item)
+        b_quantity, _, _ = StockMovement.current_balance(self.store_b, self.item)
+        self.assertEqual(a_quantity, Decimal("120.000"))
+        self.assertEqual(b_quantity, Decimal("0.000"))
+
+        response = self.client.post(
+            reverse("store:transfer_receive", args=[self.project.pk, transfer.pk]), follow=True
+        )
+        self.assertContains(response, "received")
+        transfer.refresh_from_db()
+        self.assertEqual(transfer.status, Transfer.STATUS_RECEIVED)
+        b_quantity, _, _ = StockMovement.current_balance(self.store_b, self.item)
+        self.assertEqual(b_quantity, Decimal("80.000"))
+
+    def test_posted_grn_cannot_be_edited_over_http(self):
+        self.client.force_login(self.keeper)
+        self.client.post(
+            reverse("store:grn_create", args=[self.project.pk, self.store_a.pk]),
+            {"date": "2026-03-01", "supplier": self.supplier.pk},
+        )
+        grn = GRN.objects.get(store=self.store_a)
+        self.client.post(
+            reverse("store:grn_detail", args=[self.project.pk, self.store_a.pk, grn.pk]),
+            {"item": self.item.pk, "quantity": "50", "unit_cost": "150.00"},
+        )
+        self.client.post(reverse("store:grn_post", args=[self.project.pk, self.store_a.pk, grn.pk]))
+        grn.refresh_from_db()
+        self.assertEqual(grn.status, GRN.STATUS_POSTED)
+
+        edit_response = self.client.post(
+            reverse("store:grn_detail", args=[self.project.pk, self.store_a.pk, grn.pk]),
+            {"item": self.item.pk, "quantity": "5", "unit_cost": "1.00"},
+        )
+        self.assertEqual(edit_response.status_code, 403)
+
+        # The correction path is a reversal, not an edit.
+        reverse_response = self.client.post(
+            reverse("store:grn_reverse", args=[self.project.pk, self.store_a.pk, grn.pk]),
+            {"reason": "Wrong quantity delivered"},
+            follow=True,
+        )
+        self.assertContains(reverse_response, "reversed")
+        grn.refresh_from_db()
+        self.assertEqual(grn.status, GRN.STATUS_POSTED)  # still Posted -- the original is untouched
+
+    def test_stock_count_approval_requires_a_project_manager_not_the_counter(self):
+        self.client.force_login(self.keeper)
+        self.client.post(
+            reverse("store:stock_count_create", args=[self.project.pk, self.store_a.pk]),
+            {"date": "2026-03-05"},
+        )
+        stock_count = StockCount.objects.get(store=self.store_a)
+        self.client.post(
+            reverse("store:stock_count_detail", args=[self.project.pk, self.store_a.pk, stock_count.pk]),
+            {"item": self.item.pk, "counted_quantity": "190", "reason": "Spillage"},
+        )
+        self.client.post(
+            reverse("store:stock_count_detail", args=[self.project.pk, self.store_a.pk, stock_count.pk]),
+            {"submit": "1"},
+        )
+        stock_count.refresh_from_db()
+        self.assertEqual(stock_count.status, StockCount.STATUS_SUBMITTED)
+
+        # The Storekeeper who counted cannot approve it themselves.
+        denied_response = self.client.post(
+            reverse("store:stock_count_approve", args=[self.project.pk, self.store_a.pk, stock_count.pk])
+        )
+        self.assertEqual(denied_response.status_code, 403)
+
+        self.client.force_login(self.pm)
+        approve_response = self.client.post(
+            reverse("store:stock_count_approve", args=[self.project.pk, self.store_a.pk, stock_count.pk]),
+            follow=True,
+        )
+        self.assertContains(approve_response, "approved")
+        stock_count.refresh_from_db()
+        self.assertEqual(stock_count.status, StockCount.STATUS_APPROVED)
+        self.assertEqual(stock_count.approved_by, self.pm)
+        quantity, _, _ = StockMovement.current_balance(self.store_a, self.item)
+        self.assertEqual(quantity, Decimal("190.000"))

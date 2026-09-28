@@ -5,9 +5,11 @@ movements — never typed in or stored as a running total anywhere.
 
 Step 6 built the master data (Item category, Store, Store item,
 Supplier) and the first posted document, GRN (goods received). Step 7
-adds Requisition, Issue and Return (Section 5.2 points 1, 3 and 5).
-Transfer and Stock count (points 4 and 6) are step 8. Material
-allowances (the BOQ-Store link) are step 9.
+added Requisition, Issue and Return (Section 5.2 points 1, 3 and 5).
+Step 8 adds Transfer and Stock count (points 4 and 6), plus a generic
+`DocumentReversal` for Section 2's rule "Posted documents ... cannot be
+edited or deleted; mistakes are corrected with a reversing document."
+Material allowances (the BOQ-Store link) are step 9.
 
 Item category, Store item and Supplier are managed through /admin/,
 the same way Company/UnitOfMeasure/ProjectMembership already are (see
@@ -125,11 +127,16 @@ class StockMovement(models.Model):
     DOCUMENT_GRN = "grn"
     DOCUMENT_ISSUE = "issue"
     DOCUMENT_RETURN = "return"
+    DOCUMENT_TRANSFER = "transfer"
+    DOCUMENT_ADJUSTMENT = "adjustment"
+    DOCUMENT_REVERSAL = "reversal"
     DOCUMENT_CHOICES = [
         (DOCUMENT_GRN, "GRN"),
         (DOCUMENT_ISSUE, "Issue"),
         (DOCUMENT_RETURN, "Return to store"),
-        # transfer / adjustment join this list in step 8.
+        (DOCUMENT_TRANSFER, "Transfer"),
+        (DOCUMENT_ADJUSTMENT, "Stock count adjustment"),
+        (DOCUMENT_REVERSAL, "Reversal"),
     ]
 
     store = models.ForeignKey(Store, on_delete=models.PROTECT, related_name="movements")
@@ -187,10 +194,9 @@ class GRN(models.Model):
     the StockMovement rows) are deliberately two steps — a GRN can be
     built up as a Draft first and corrected freely, but once Posted it
     follows Section 2's rule: "Posted documents ... cannot be edited or
-    deleted; mistakes are corrected with a reversing document." (There
-    is no reversing-document type yet -- issues, transfers and
-    adjustments don't exist until steps 7-8 -- so for now a posting
-    mistake has no in-app fix; this is disclosed in the README.)
+    deleted; mistakes are corrected with a reversing document" — see
+    `reverse()`, added in step 8 (`DocumentReversal`, defined further
+    down this file).
     """
 
     STATUS_DRAFT = "draft"
@@ -245,6 +251,22 @@ class GRN(models.Model):
                 )
             self.status = self.STATUS_POSTED
             self.save()
+
+    @property
+    def is_reversed(self):
+        return DocumentReversal.objects.filter(
+            document_type=StockMovement.DOCUMENT_GRN, document_id=self.pk
+        ).exists()
+
+    def reverse(self, user, reason):
+        """Step 8's answer to "mistakes are corrected with a reversing
+        document": negates every StockMovement this GRN posted. Only a
+        Posted, not-already-reversed GRN can be reversed -- the GRN
+        row itself is untouched (still Posted, still locked), the
+        correction is a separate document, per Section 2's rule."""
+        if self.status != self.STATUS_POSTED:
+            raise ValidationError("Only a Posted GRN can be reversed.")
+        return DocumentReversal.create_for(StockMovement.DOCUMENT_GRN, self.pk, user, reason)
 
 
 class GRNLine(models.Model):
@@ -469,6 +491,23 @@ class Issue(models.Model):
             if self.requisition_id:
                 self.requisition.update_status()
 
+    @property
+    def is_reversed(self):
+        return DocumentReversal.objects.filter(
+            document_type=StockMovement.DOCUMENT_ISSUE, document_id=self.pk
+        ).exists()
+
+    def reverse(self, user, reason):
+        """Same reversing-document mechanism as GRN.reverse() -- see
+        DocumentReversal. Reversing an issue restores the stock it
+        removed (each movement's quantity was negative, so its
+        negation is positive), so it can never itself be blocked by
+        the "no negative stock" rule; it's included there for
+        symmetry with GRN/transfer reversal, which can be blocked."""
+        if self.status != self.STATUS_POSTED:
+            raise ValidationError("Only a Posted issue can be reversed.")
+        return DocumentReversal.create_for(StockMovement.DOCUMENT_ISSUE, self.pk, user, reason)
+
 
 class IssueLine(models.Model):
     issue = models.ForeignKey(Issue, on_delete=models.CASCADE, related_name="lines")
@@ -562,6 +601,21 @@ class ReturnToStore(models.Model):
             self.status = self.STATUS_POSTED
             self.save()
 
+    @property
+    def is_reversed(self):
+        return DocumentReversal.objects.filter(
+            document_type=StockMovement.DOCUMENT_RETURN, document_id=self.pk
+        ).exists()
+
+    def reverse(self, user, reason):
+        """Same mechanism as GRN.reverse()/Issue.reverse() -- reversing
+        a return removes the stock it restored, so (unlike reversing
+        an issue) it *can* be blocked if that stock has since moved on
+        elsewhere -- DocumentReversal.create_for() checks this."""
+        if self.status != self.STATUS_POSTED:
+            raise ValidationError("Only a Posted return can be reversed.")
+        return DocumentReversal.create_for(StockMovement.DOCUMENT_RETURN, self.pk, user, reason)
+
 
 class ReturnLine(models.Model):
     ret = models.ForeignKey(ReturnToStore, on_delete=models.CASCADE, related_name="lines")
@@ -579,3 +633,359 @@ class ReturnLine(models.Model):
 
     def __str__(self):
         return f"{self.item.code} x{self.quantity} ({self.condition})"
+
+
+class Transfer(models.Model):
+    """
+    Section 5.2 point 4: "stock leaves one store on dispatch and
+    arrives at the other only when received." Three states, not the
+    spec's literal two ("In transit, Received") -- a Draft stage is
+    added first, same as every other document here, so lines can be
+    built up and corrected before anything actually leaves a store;
+    the spec's two named states are exactly what Draft leads into.
+
+    Section 5.3 rule 7's "transfers in transit are shown separately
+    and count in neither store's stock" falls out of the two-movement
+    design for free: `dispatch()` removes stock from `from_store`
+    immediately (so it's already gone from there), and `receive()` is
+    the *only* thing that adds it to `to_store` (so it isn't there
+    yet either) -- nothing extra needs to track "in transit" for the
+    balance to be correct; `current_balance()` already excludes it
+    from both stores by construction. "Shown separately" is simply
+    this model's own `status` column on the transfer list.
+
+    Numbered per *project*, not per store like GRN/Issue/Return --
+    a transfer inherently touches two stores, so there's no single
+    store to scope the sequence to; this is a disclosed deviation from
+    Section 5.3 rule 5's literal "per store."
+    """
+
+    STATUS_DRAFT = "draft"
+    STATUS_IN_TRANSIT = "in_transit"
+    STATUS_RECEIVED = "received"
+    STATUS_CHOICES = [
+        (STATUS_DRAFT, "Draft"),
+        (STATUS_IN_TRANSIT, "In transit"),
+        (STATUS_RECEIVED, "Received"),
+    ]
+
+    number = models.PositiveIntegerField()
+    date = models.DateField()
+    project = models.ForeignKey(Project, on_delete=models.PROTECT, related_name="transfers")
+    from_store = models.ForeignKey(Store, on_delete=models.PROTECT, related_name="transfers_out")
+    to_store = models.ForeignKey(Store, on_delete=models.PROTECT, related_name="transfers_in")
+    dispatched_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="+"
+    )
+    received_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="+"
+    )
+    status = models.CharField(max_length=12, choices=STATUS_CHOICES, default=STATUS_DRAFT)
+
+    class Meta:
+        ordering = ["project", "number"]
+        constraints = [
+            models.UniqueConstraint(fields=["project", "number"], name="unique_transfer_number_per_project")
+        ]
+
+    def __str__(self):
+        return f"Transfer {self.number} — {self.from_store.code} to {self.to_store.code}"
+
+    def clean(self):
+        if self.from_store_id and self.to_store_id and self.from_store_id == self.to_store_id:
+            raise ValidationError("A transfer must be between two different stores.")
+
+    @property
+    def is_editable(self):
+        return self.status == self.STATUS_DRAFT
+
+    def dispatch(self, user):
+        """
+        Rule 2's "cannot exceed stock on hand" applies here exactly as
+        it does to Issue.post(): every line's quantity is summed per
+        item across the whole transfer before checking it against
+        `from_store`'s balance, and the average cost is captured once
+        per item and frozen onto each line (`dispatch_unit_cost`) so
+        `receive()` can post the arrival at the same cost without
+        re-deriving it later, once time has passed and the store's
+        average may have moved on.
+        """
+        if self.status != self.STATUS_DRAFT:
+            raise ValidationError("Only a Draft transfer can be dispatched.")
+        lines = list(self.lines.select_related("item"))
+        if not lines:
+            raise ValidationError("A transfer needs at least one line before it can be dispatched.")
+
+        errors = []
+        cost_by_item = {}
+        requested_by_item = {}
+        for line in lines:
+            requested_by_item[line.item_id] = requested_by_item.get(line.item_id, Decimal("0")) + line.quantity
+        for item_id, requested in requested_by_item.items():
+            item = next(l.item for l in lines if l.item_id == item_id)
+            available, _, average_cost = StockMovement.current_balance(self.from_store, item)
+            if requested > available:
+                errors.append(
+                    f"{item.code}: transferring {requested} {item.unit.code} would exceed the "
+                    f"{available} {item.unit.code} in stock at {self.from_store.code}."
+                )
+            cost_by_item[item_id] = average_cost
+        if errors:
+            raise ValidationError(errors)
+
+        with transaction.atomic():
+            for line in lines:
+                line.dispatch_unit_cost = cost_by_item[line.item_id]
+                line.save(update_fields=["dispatch_unit_cost"])
+                StockMovement.objects.create(
+                    store=self.from_store,
+                    item=line.item,
+                    quantity=-line.quantity,
+                    unit_cost=cost_by_item[line.item_id],
+                    document_type=StockMovement.DOCUMENT_TRANSFER,
+                    document_id=self.pk,
+                    created_by=user,
+                )
+            self.status = self.STATUS_IN_TRANSIT
+            self.dispatched_by = user
+            self.save()
+
+    def receive(self, user):
+        """Posts the arrival at `to_store`, at the cost frozen onto
+        each line when it was dispatched -- a transfer doesn't
+        re-value stock, it just moves it."""
+        if self.status != self.STATUS_IN_TRANSIT:
+            raise ValidationError("Only an In transit transfer can be received.")
+        lines = list(self.lines.all())
+        with transaction.atomic():
+            for line in lines:
+                StockMovement.objects.create(
+                    store=self.to_store,
+                    item=line.item,
+                    quantity=line.quantity,
+                    unit_cost=line.dispatch_unit_cost,
+                    document_type=StockMovement.DOCUMENT_TRANSFER,
+                    document_id=self.pk,
+                    created_by=user,
+                )
+            self.status = self.STATUS_RECEIVED
+            self.received_by = user
+            self.save()
+
+
+class TransferLine(models.Model):
+    transfer = models.ForeignKey(Transfer, on_delete=models.CASCADE, related_name="lines")
+    item = models.ForeignKey(StoreItem, on_delete=models.PROTECT, related_name="+")
+    quantity = models.DecimalField(max_digits=14, decimal_places=3)
+    # Frozen at dispatch time (see Transfer.dispatch()); blank until then.
+    dispatch_unit_cost = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True, editable=False)
+
+    class Meta:
+        ordering = ["pk"]
+
+    def __str__(self):
+        return f"{self.item.code} x{self.quantity}"
+
+
+class StockCount(models.Model):
+    """
+    Section 5.2 point 6: "physical count; differences post as
+    adjustments after Project Manager approval." Section 2's
+    permissions table gives the Storekeeper "Yes" (they do the count)
+    and the Project Manager "Approve" -- the same shape as GRN/Issue,
+    except the posting action (`approve()`) belongs to a different
+    role than the one who built the document, and Section 2's own
+    rule "No user can approve their own adjustment" is enforced there.
+    """
+
+    STATUS_DRAFT = "draft"
+    STATUS_SUBMITTED = "submitted"
+    STATUS_APPROVED = "approved"
+    STATUS_CHOICES = [
+        (STATUS_DRAFT, "Draft"),
+        (STATUS_SUBMITTED, "Submitted"),
+        (STATUS_APPROVED, "Approved"),
+    ]
+
+    number = models.PositiveIntegerField()
+    date = models.DateField()
+    store = models.ForeignKey(Store, on_delete=models.PROTECT, related_name="stock_counts")
+    counted_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="+")
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="+"
+    )
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default=STATUS_DRAFT)
+
+    class Meta:
+        ordering = ["store", "number"]
+        constraints = [
+            models.UniqueConstraint(fields=["store", "number"], name="unique_stock_count_number_per_store")
+        ]
+
+    def __str__(self):
+        return f"Stock count {self.number} — {self.store.code}"
+
+    @property
+    def is_editable(self):
+        return self.status == self.STATUS_DRAFT
+
+    def submit(self):
+        """Draft -> Submitted: hands the count to a Project Manager
+        for approval. Nothing is posted yet -- submitting only closes
+        the counting stage, the same way a requisition's "Pending"
+        just means it's waiting on someone else's action."""
+        if self.status != self.STATUS_DRAFT:
+            raise ValidationError("Only a Draft stock count can be submitted.")
+        if not self.lines.exists():
+            raise ValidationError("A stock count needs at least one line before it can be submitted.")
+        self.status = self.STATUS_SUBMITTED
+        self.save()
+
+    def approve(self, user):
+        """
+        Posts one StockMovement per line whose counted quantity
+        differs from its (frozen-at-add-time) system quantity, at the
+        store's current average cost -- the adjustment, per Section
+        5.2's own wording. "No user can approve their own adjustment"
+        (Section 2) is checked here: the approver can never be the
+        person who counted.
+        """
+        if self.status != self.STATUS_SUBMITTED:
+            raise ValidationError("Only a Submitted stock count can be approved.")
+        if user.id == self.counted_by_id:
+            raise ValidationError("The person who counted cannot approve their own stock count.")
+        lines = list(self.lines.select_related("item"))
+        with transaction.atomic():
+            for line in lines:
+                difference = line.difference
+                if difference == 0:
+                    continue
+                _, _, average_cost = StockMovement.current_balance(self.store, line.item)
+                StockMovement.objects.create(
+                    store=self.store,
+                    item=line.item,
+                    quantity=difference,
+                    unit_cost=average_cost,
+                    document_type=StockMovement.DOCUMENT_ADJUSTMENT,
+                    document_id=self.pk,
+                    created_by=user,
+                )
+            self.status = self.STATUS_APPROVED
+            self.approved_by = user
+            self.save()
+
+
+class StockCountLine(models.Model):
+    stock_count = models.ForeignKey(StockCount, on_delete=models.CASCADE, related_name="lines")
+    item = models.ForeignKey(StoreItem, on_delete=models.PROTECT, related_name="+")
+    # Snapshotted from current_balance() when the line is added (see
+    # store/forms.py), not user-editable -- a stock count compares a
+    # physical count against the system figure *at the moment of
+    # counting*, same as any real stock take.
+    system_quantity = models.DecimalField(max_digits=14, decimal_places=3, editable=False)
+    counted_quantity = models.DecimalField(max_digits=14, decimal_places=3)
+    reason = models.CharField(max_length=255, blank=True)
+
+    class Meta:
+        ordering = ["pk"]
+
+    def __str__(self):
+        return f"{self.item.code}: system {self.system_quantity}, counted {self.counted_quantity}"
+
+    @property
+    def difference(self):
+        return self.counted_quantity - self.system_quantity
+
+
+class DocumentReversal(models.Model):
+    """
+    Section 2's rule: "Posted documents (GRN, issue, transfer,
+    adjustment) cannot be edited or deleted; mistakes are corrected
+    with a reversing document." One generic model handles all of
+    them uniformly, by working from `StockMovement.document_type` +
+    `document_id` rather than each document's own line structure:
+    reversing a document means finding every `StockMovement` it
+    posted and creating an equal-and-opposite one for each, so this
+    works the same way whether the original was a GRN, an Issue or a
+    Return without any type-specific code.
+
+    A Transfer or a Stock count adjustment isn't reversible through
+    this model yet -- disclosed simplification. A Transfer already
+    has its own two-sided correction path (the two stores can transfer
+    the material back), and a Stock count's approved adjustment *is*
+    itself the correction for whatever the physical count found, so
+    neither had the same obvious need as GRN/Issue/Return, which is
+    what step 8's acceptance-test-adjacent rule ("posted GRN cannot be
+    edited") is really about.
+
+    Exactly one reversal per document (see the unique constraint) --
+    to correct further, post a brand-new document rather than
+    reversing a reversal.
+    """
+
+    document_type = models.CharField(max_length=15, choices=StockMovement.DOCUMENT_CHOICES)
+    document_id = models.PositiveIntegerField()
+    reason = models.CharField(max_length=255)
+    reversed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="+")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["document_type", "document_id"], name="one_reversal_per_document"
+            )
+        ]
+
+    def __str__(self):
+        return f"Reversal of {self.document_type} #{self.document_id}"
+
+    @staticmethod
+    def create_for(document_type, document_id, user, reason):
+        original_movements = list(
+            StockMovement.objects.filter(document_type=document_type, document_id=document_id)
+        )
+        if not original_movements:
+            raise ValidationError("Nothing was posted for this document — there is nothing to reverse.")
+        if DocumentReversal.objects.filter(document_type=document_type, document_id=document_id).exists():
+            raise ValidationError("This document has already been reversed.")
+
+        # Group the would-be reversal quantities per store+item so a
+        # reversal that would take stock negative (e.g. a GRN whose
+        # delivery has since partly been issued away) is blocked
+        # before anything is written -- same all-or-nothing check as
+        # Issue.post().
+        totals = {}
+        for movement in original_movements:
+            key = (movement.store_id, movement.item_id)
+            totals[key] = totals.get(key, Decimal("0")) - movement.quantity
+        errors = []
+        for (store_id, item_id), delta in totals.items():
+            if delta < 0:
+                store = Store.objects.get(pk=store_id)
+                item = StoreItem.objects.get(pk=item_id)
+                available, _, _ = StockMovement.current_balance(store, item)
+                if available + delta < 0:
+                    errors.append(
+                        f"{item.code}: reversing this document would take stock at {store.code} negative."
+                    )
+        if errors:
+            raise ValidationError(errors)
+
+        with transaction.atomic():
+            reversal = DocumentReversal.objects.create(
+                document_type=document_type, document_id=document_id, reason=reason, reversed_by=user
+            )
+            for movement in original_movements:
+                StockMovement.objects.create(
+                    store=movement.store,
+                    item=movement.item,
+                    quantity=-movement.quantity,
+                    unit_cost=movement.unit_cost,
+                    document_type=StockMovement.DOCUMENT_REVERSAL,
+                    document_id=reversal.pk,
+                    boq_item_id=movement.boq_item_id,
+                    section_id=movement.section_id,
+                    created_by=user,
+                )
+        return reversal

@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+
+{% block title %}Stock count {{ stock_count.number }} — {{ store.code }}{% endblock %}
+
+{% block content %}
+<p><a href="{% url 'store:stock_count_list' project.pk store.pk %}">&larr; Stock counts — {{ store.code }}</a></p>
+<h1>Stock count {{ stock_count.number }} — {{ store.code }} ({{ stock_count.get_status_display }})</h1>
+
+<dl>
+    <dt>Date</dt><dd>{{ stock_count.date }}</dd>
+    <dt>Counted by</dt><dd>{{ stock_count.counted_by }}</dd>
+    <dt>Approved by</dt><dd>{{ stock_count.approved_by|default:"—" }}</dd>
+</dl>
+
+<h2>Lines</h2>
+<table border="1" cellpadding="4">
+    <thead>
+        <tr><th>Item</th><th>System qty</th><th>Counted qty</th><th>Difference</th><th>Reason</th></tr>
+    </thead>
+    <tbody>
+        {% for line in lines %}
+        <tr>
+            <td>{{ line.item.code }} — {{ line.item.name }}</td>
+            <td>{{ line.system_quantity }} {{ line.item.unit.code }}</td>
+            <td>{{ line.counted_quantity }} {{ line.item.unit.code }}</td>
+            <td>{{ line.difference }}</td>
+            <td>{{ line.reason|default:"—" }}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="5">No lines yet.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+{% if can_manage and stock_count.is_editable %}
+<h2>Add a line</h2>
+<p>The system quantity is captured automatically from the current stock balance when a line is added.</p>
+<form method="post">
+    {% csrf_token %}
+    {{ line_form.as_p }}
+    <button type="submit">Add line</button>
+</form>
+
+<h2>Submit for approval</h2>
+<p>Submitting hands this count to a Project Manager, who approves it to post the differences as
+    adjustments.</p>
+<form method="post">
+    {% csrf_token %}
+    <button type="submit" name="submit" value="1" {% if not lines %}disabled{% endif %}>Submit for approval</button>
+</form>
+{% endif %}
+
+{% if can_approve and stock_count.status == "submitted" %}
+<h2>Approve this stock count</h2>
+<p>Approving posts one stock adjustment per line whose counted quantity differs from the system
+    quantity, at {{ store.code }}'s current average cost. The person who counted cannot approve
+    their own count.</p>
+<form method="post" action="{% url 'store:stock_count_approve' project.pk store.pk stock_count.pk %}">
+    {% csrf_token %}
+    <button type="submit">Approve</button>
+</form>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+
+{% block title %}Start a stock count — {{ store.code }}{% endblock %}
+
+{% block content %}
+<p><a href="{% url 'store:stock_count_list' project.pk store.pk %}">&larr; Stock counts — {{ store.code }}</a></p>
+<h1>Start a stock count — {{ store.code }}</h1>
+
+<form method="post">
+    {% csrf_token %}
+    {{ form.as_p }}
+    <button type="submit">Create as Draft</button>
+</form>
+{% endblock %}

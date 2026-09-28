@@ -55,4 +55,18 @@
     <button type="submit" {% if not lines %}disabled{% endif %}>Post return</button>
 </form>
 {% endif %}
+
+{% if can_manage and not ret.is_editable %}
+    {% if ret.is_reversed %}
+    <p>This return has already been reversed.</p>
+    {% else %}
+    <h2>Reverse this return</h2>
+    <p>Reversing removes the stock this return restored. Give a reason for the correction.</p>
+    <form method="post" action="{% url 'store:return_reverse' project.pk store.pk ret.pk %}">
+        {% csrf_token %}
+        {{ reversal_form.as_p }}
+        <button type="submit">Reverse return</button>
+    </form>
+    {% endif %}
+{% endif %}
 {% endblock %}

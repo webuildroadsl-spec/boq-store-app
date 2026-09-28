@@ -81,4 +81,19 @@
     {% endfor %}
 </ul>
 {% endif %}
+
+{% if can_manage and not grn.is_editable %}
+    {% if grn.is_reversed %}
+    <p>This GRN has already been reversed.</p>
+    {% else %}
+    <h2>Reverse this GRN</h2>
+    <p>A Posted document cannot be edited — reversing creates a new document that undoes every
+        movement this GRN posted, negated. Give a reason for the correction.</p>
+    <form method="post" action="{% url 'store:grn_reverse' project.pk store.pk grn.pk %}">
+        {% csrf_token %}
+        {{ reversal_form.as_p }}
+        <button type="submit">Reverse GRN</button>
+    </form>
+    {% endif %}
+{% endif %}
 {% endblock %}

@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+
+{% block title %}Stock counts — {{ store.code }}{% endblock %}
+
+{% block content %}
+<p><a href="{% url 'store:store_detail' project.pk store.pk %}">&larr; {{ store.code }}</a></p>
+<h1>Stock counts — {{ store.code }}</h1>
+
+<table border="1" cellpadding="4">
+    <thead>
+        <tr><th>Count</th><th>Date</th><th>Counted by</th><th>Approved by</th><th>Status</th></tr>
+    </thead>
+    <tbody>
+        {% for stock_count in stock_counts %}
+        <tr>
+            <td>
+                <a href="{% url 'store:stock_count_detail' project.pk store.pk stock_count.pk %}">{{ stock_count.number }}</a>
+            </td>
+            <td>{{ stock_count.date }}</td>
+            <td>{{ stock_count.counted_by }}</td>
+            <td>{{ stock_count.approved_by|default:"—" }}</td>
+            <td>{{ stock_count.get_status_display }}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="5">No stock counts recorded yet.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+{% if can_manage %}
+<p><a href="{% url 'store:stock_count_create' project.pk store.pk %}">Start a stock count</a></p>
+{% endif %}
+{% endblock %}

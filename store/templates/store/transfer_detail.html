@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+
+{% block title %}Transfer {{ transfer.number }} — {{ project.code }}{% endblock %}
+
+{% block content %}
+<p><a href="{% url 'store:transfer_list' project.pk %}">&larr; Transfers — {{ project.code }}</a></p>
+<h1>Transfer {{ transfer.number }} — {{ project.code }} ({{ transfer.get_status_display }})</h1>
+
+<dl>
+    <dt>Date</dt><dd>{{ transfer.date }}</dd>
+    <dt>From store</dt><dd>{{ transfer.from_store.code }} — {{ transfer.from_store.name }}</dd>
+    <dt>To store</dt><dd>{{ transfer.to_store.code }} — {{ transfer.to_store.name }}</dd>
+    <dt>Dispatched by</dt><dd>{{ transfer.dispatched_by|default:"—" }}</dd>
+    <dt>Received by</dt><dd>{{ transfer.received_by|default:"—" }}</dd>
+</dl>
+
+{% if transfer.status == "in_transit" %}
+<p><strong>In transit</strong> — this stock has left {{ transfer.from_store.code }} but has not yet
+    arrived at {{ transfer.to_store.code }}; it counts in neither store's stock balance until received.</p>
+{% endif %}
+
+<h2>Lines</h2>
+<table border="1" cellpadding="4">
+    <thead>
+        <tr><th>Item</th><th>Quantity</th><th>Dispatch unit cost</th><th></th></tr>
+    </thead>
+    <tbody>
+        {% for line in lines %}
+        <tr>
+            <td>{{ line.item.code }} — {{ line.item.name }}</td>
+            <td>{{ line.quantity }} {{ line.item.unit.code }}</td>
+            <td>{{ line.dispatch_unit_cost|default:"—" }}</td>
+            <td>
+                {% if can_dispatch and transfer.is_editable %}
+                <form method="post" action="{% url 'store:transfer_line_delete' project.pk transfer.pk line.pk %}">
+                    {% csrf_token %}
+                    <button type="submit">Remove</button>
+                </form>
+                {% endif %}
+            </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="4">No lines yet.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+{% if can_dispatch and transfer.is_editable %}
+<h2>Add a line</h2>
+<form method="post">
+    {% csrf_token %}
+    {{ line_form.as_p }}
+    <button type="submit">Add line</button>
+</form>
+
+<h2>Dispatch this transfer</h2>
+<p>Dispatching removes stock from {{ transfer.from_store.code }} at its current average cost.
+    Dispatching more than is in stock is blocked, the same rule as an issue.</p>
+<form method="post" action="{% url 'store:transfer_dispatch' project.pk transfer.pk %}">
+    {% csrf_token %}
+    <button type="submit" {% if not lines %}disabled{% endif %}>Dispatch</button>
+</form>
+{% endif %}
+
+{% if can_receive and transfer.status == "in_transit" %}
+<h2>Receive this transfer</h2>
+<p>Receiving adds stock to {{ transfer.to_store.code }} at the cost it was dispatched at, and completes
+    the transfer.</p>
+<form method="post" action="{% url 'store:transfer_receive' project.pk transfer.pk %}">
+    {% csrf_token %}
+    <button type="submit">Receive</button>
+</form>
+{% endif %}
+{% endblock %}

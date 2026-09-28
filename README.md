@@ -4,7 +4,7 @@ Django + PostgreSQL backend for the BOQ and Store modules described in
 [`docs/requirements.md`](docs/requirements.md). This repo is being built
 one step at a time from Section 8 of that spec.
 
-**Current status: Step 7 of 10** — Requisition, issue, return.
+**Current status: Step 8 of 10** — Transfer, stock count, adjustment, reversing documents.
 
 ## Setup (local development)
 
@@ -458,6 +458,120 @@ workaround, and no reversing-document type exists for any Posted
 document yet, GRN included. Material allowances linking a BOQ item to
 a store item (step 9) still don't exist, so the `boq_item` recorded on
 each issue/return movement isn't reconciled against anything yet.
+
+## Transfer, stock count, adjustment, reversing documents (step 8)
+
+Two new document types, plus the correction mechanism Section 2 has
+been calling for since step 6:
+
+- **Transfer has three states, not the spec's literal two.** Section
+  5.1 lists a Transfer's status as "(In transit, Received)" only, but
+  every other document here starts as an editable Draft before
+  anything is posted, so a `STATUS_DRAFT` stage was added ahead of
+  those two — lines can be built up and corrected before stock
+  actually leaves a store. `dispatch()` and `receive()` are exactly
+  the spec's two named transitions.
+- **"Stock in transit counts in neither store" needed no extra
+  bookkeeping** — it falls out of the two-movement design for free.
+  `dispatch()` removes stock from `from_store` immediately (one
+  `StockMovement` per line, same all-or-nothing "cannot exceed stock
+  on hand" check as `Issue.post()`, aggregated per item across the
+  whole transfer); `receive()` is the *only* thing that adds it to
+  `to_store`, and does so at the cost frozen onto each line at dispatch
+  time (`TransferLine.dispatch_unit_cost`) rather than re-deriving a
+  cost later. Since nothing else touches either store's balance in
+  between, `StockMovement.current_balance()` already excludes the
+  in-transit quantity from both stores without any special-casing —
+  confirmed directly by test and by manual balance checks at every
+  stage. "Shown separately" (5.3 rule 7) is simply the transfer list's
+  own `status` column.
+- **Transfer is numbered per project, not per store** — a disclosed
+  deviation from Section 5.3 rule 5's literal "per store": a transfer
+  inherently touches two stores, so there's no single store to scope
+  the sequence to.
+- **Transfer's permission row ("Storekeeper: Yes, Project Manager:
+  Approve") has no matching field in the data model** — unlike Stock
+  count, which has an explicit `approved_by` field and an explicit
+  business-rule sentence. Since there's nothing to gate a distinct
+  approval step on, "Approve" is read here as the Project Manager
+  simply having the same operational access as a storekeeper
+  (dispatch or receive directly), on top of each store's own assigned
+  storekeeper — a disclosed interpretation, not a literal field.
+- **Stock count is the one place Section 2's "No user can approve
+  their own adjustment" rule actually bites.** A Storekeeper counts
+  (`StockCountLine.system_quantity` is snapshotted from
+  `current_balance()` automatically when a line is added, never typed
+  in), then `submit()`s the count; a Project Manager `approve()`s it,
+  which posts one adjustment `StockMovement` per line whose counted
+  quantity differs from the system quantity, at the store's current
+  average cost — and `approve()` explicitly refuses if the approver is
+  the same user who counted, exactly per Section 2's rule, not just by
+  relying on the role check to happen to keep them apart.
+- **`DocumentReversal` is the "reversing document" Section 2 has named
+  since the very first GRN rule** ("Posted documents ... cannot be
+  edited or deleted; mistakes are corrected with a reversing
+  document"). One generic model handles GRN, Issue and Return
+  uniformly: it works from `StockMovement.document_type` +
+  `document_id` rather than any document's own line structure, so
+  reversing means finding every movement the original document posted
+  and creating an exact negation of each — no type-specific code
+  needed. The original document itself is never touched (still
+  Posted, still locked); the correction is a separate, linked record.
+  Reversing is blocked, the same all-or-nothing way as everything
+  else here, if it would take any affected store+item negative (e.g.
+  reversing a GRN whose delivery has since been partly issued away).
+  Exactly one reversal per document — correcting further means posting
+  a brand-new document, not reversing a reversal.
+- **Transfer and Stock count adjustments aren't reversible through
+  `DocumentReversal`** — disclosed simplification. A Transfer already
+  has an obvious two-sided correction (transfer the material back);
+  a Stock count's approved adjustment *is itself* the correction for
+  whatever the physical count found. Neither had the same clear need
+  as GRN/Issue/Return, which is what "posted GRN cannot be edited" is
+  really pointing at.
+
+**The step 8 acceptance test** — "Stock in transit counts in neither
+store; posted GRN cannot be edited" — was run manually end-to-end over
+real HTTP, in addition to being a unit and view test. With Store A
+holding 200 t of stock, a transfer of 80 t to Store B was dispatched:
+Store A immediately read 120 t and Store B read 0 t — confirmed by
+querying both balances directly while the transfer sat "in transit,"
+not just by trusting the page. Receiving then brought Store B to 80 t
+at the same 150.00 cost it left at. Separately, a GRN was posted and a
+follow-up edit attempt correctly got a 403; reversing it instead
+succeeded and returned stock to where it was before that GRN, with the
+GRN itself still showing status Posted. A stock count was also
+exercised: the storekeeper who counted was blocked (403) from
+approving their own count, and logging in as a Project Manager to
+approve it posted the correct adjustment. Smoke-test data cleaned up
+afterward.
+
+**Tested:** `store/tests.py` — the acceptance test itself at the model
+level (in-transit balances checked at both stores, mid-transfer, before
+`receive()` is even called), dispatching more than available being
+blocked, a transfer to the same store being rejected by `clean()`,
+receiving before dispatching being blocked, a stock count's shortage
+posting as a negative adjustment, a stock count with no difference
+posting nothing, the counter/approver self-check, submitting an empty
+count being blocked, a GRN reversal restoring stock and being blocked
+a second time or before anything was posted, a reversal being blocked
+when the affected stock would go negative, and an issue reversal
+restoring stock. `store/test_views.py` — the acceptance test over the
+Django test client (balances checked mid-transfer via the same
+`current_balance()` calls, not just page content), the blocked edit
+plus successful reversal of a posted GRN, and stock count approval
+being refused to the counter (403) but succeeding for a Project
+Manager. 141 tests pass overall (125 existing + 16 new).
+
+**Not built** (deliberately, step 9-10 per Section 8): material
+allowances and the reconciliation report, so nothing yet compares
+material issued against what the BOQ allows or flags overuse; and
+none of step 10's reports, dashboard, offline support or backups.
+Document numbers still don't follow Section 5.3 rule 5's literal
+`GRN-MAIN-2026-0015` format anywhere in the app (plain incrementing
+integers, per store or per project) — a simplification carried since
+step 6 that should have been disclosed there and is being disclosed
+now instead.
 
 ## How project access is scoped (step 2)
 

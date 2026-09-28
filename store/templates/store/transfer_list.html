@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+
+{% block title %}Transfers — {{ project.code }}{% endblock %}
+
+{% block content %}
+<p><a href="{% url 'core:project_detail' project.pk %}">&larr; {{ project.code }}</a></p>
+<h1>Transfers between stores — {{ project.code }}</h1>
+
+<table border="1" cellpadding="4">
+    <thead>
+        <tr><th>Transfer</th><th>Date</th><th>From</th><th>To</th><th>Status</th></tr>
+    </thead>
+    <tbody>
+        {% for transfer in transfers %}
+        <tr>
+            <td><a href="{% url 'store:transfer_detail' project.pk transfer.pk %}">{{ transfer.number }}</a></td>
+            <td>{{ transfer.date }}</td>
+            <td>{{ transfer.from_store.code }}</td>
+            <td>{{ transfer.to_store.code }}</td>
+            <td>{{ transfer.get_status_display }}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="5">No transfers recorded yet.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+<p><a href="{% url 'store:transfer_create' project.pk %}">Start a transfer</a></p>
+{% endblock %}
