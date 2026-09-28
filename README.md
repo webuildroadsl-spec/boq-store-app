@@ -4,7 +4,8 @@ Django + PostgreSQL backend for the BOQ and Store modules described in
 [`docs/requirements.md`](docs/requirements.md). This repo is being built
 one step at a time from Section 8 of that spec.
 
-**Current status: Step 1 of 10** — Django project, PostgreSQL, login.
+**Current status: Step 2 of 10** — Company, project, section, unit,
+roles and permissions.
 
 ## Setup (local development)
 
@@ -51,9 +52,22 @@ python manage.py test
   points.
 - `accounts/` — custom user model, login/logout views, home page, and
   the tests for all of it.
+- `core/` — Company, Project, Section, UnitOfMeasure and
+  ProjectMembership models; project-scoped list/detail views; the
+  `core.permissions` helpers everything else should filter through.
 - `templates/` — project-wide templates (`base.html`,
   `registration/login.html`).
 - `docs/requirements.md` — the full requirements spec this build follows.
+
+## How project access is scoped (step 2)
+
+Every user who isn't a Django superuser only ever sees the projects
+they have a `ProjectMembership` row for — set this up per user per
+project in `/admin/`. A superuser (`is_superuser=True`) is treated as
+the spec's company-wide "Admin" and sees every project without needing
+a membership row for each one. See `core/permissions.py` for exactly
+how that's enforced, and `core/tests.py` for the acceptance test (a
+Storekeeper on one project gets a 404 on another).
 
 ## Why a custom user model on day one?
 

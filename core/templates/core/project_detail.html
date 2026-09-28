@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+
+{% block title %}{{ project.code }}{% endblock %}
+
+{% block content %}
+<p><a href="{% url 'core:project_list' %}">&larr; All projects</a></p>
+<h1>{{ project.code }} — {{ project.name }}</h1>
+<dl>
+    <dt>Client</dt><dd>{{ project.client|default:"—" }}</dd>
+    <dt>Location</dt><dd>{{ project.location|default:"—" }}</dd>
+    <dt>Status</dt><dd>{{ project.get_status_display }}</dd>
+    <dt>Currency</dt><dd>{{ project.currency }}</dd>
+    <dt>Contract sum</dt><dd>{{ project.contract_sum|default:"—" }}</dd>
+</dl>
+
+<h2>Sections</h2>
+{% if project.sections.all %}
+    <ul>
+        {% for section in project.sections.all %}
+            <li>{{ section.code }} — {{ section.name }} ({{ section.start_chainage }} – {{ section.end_chainage }} km)</li>
+        {% endfor %}
+    </ul>
+{% else %}
+    <p>No sections recorded yet.</p>
+{% endif %}
+{% endblock %}

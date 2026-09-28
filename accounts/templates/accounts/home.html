@@ -5,6 +5,7 @@
 {% block content %}
 <h1>BOQ &amp; Store</h1>
 <p>Logged in as {{ user.username }}.</p>
+<p><a href="{% url 'core:project_list' %}">My projects</a></p>
 <form method="post" action="{% url 'accounts:logout' %}">
     {% csrf_token %}
     <button type="submit">Log out</button>
