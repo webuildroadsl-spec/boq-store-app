@@ -57,6 +57,11 @@ def user_can_access_project(user, project):
 _BOQ_VIEW_ROLES = {ROLE_PROJECT_MANAGER, ROLE_QS, ROLE_SITE_ENGINEER, ROLE_VIEWER}
 _BOQ_EDIT_ROLES = {ROLE_QS}
 
+# Section 2's "Approve BOQ revision or variation" row: Admin=Yes,
+# Project Manager=Yes, everyone else No — a QS can build a revision or
+# VO (can_edit_boq) but not sign it off.
+_BOQ_APPROVE_ROLES = {ROLE_PROJECT_MANAGER}
+
 
 def can_view_boq(user, project):
     if user.is_superuser:
@@ -68,3 +73,9 @@ def can_edit_boq(user, project):
     if user.is_superuser:
         return True
     return get_role(user, project) in _BOQ_EDIT_ROLES
+
+
+def can_approve_boq(user, project):
+    if user.is_superuser:
+        return True
+    return get_role(user, project) in _BOQ_APPROVE_ROLES

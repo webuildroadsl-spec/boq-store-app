@@ -4,7 +4,7 @@ Django + PostgreSQL backend for the BOQ and Store modules described in
 [`docs/requirements.md`](docs/requirements.md). This repo is being built
 one step at a time from Section 8 of that spec.
 
-**Current status: Step 4 of 10** — BOQ Excel import and export.
+**Current status: Step 5 of 10** — BOQ versions, approval, variation orders, compare.
 
 ## Setup (local development)
 
@@ -54,8 +54,9 @@ python manage.py test
 - `core/` — Company, Project, Section, UnitOfMeasure and
   ProjectMembership models; project-scoped list/detail views; the
   `core.permissions` helpers everything else should filter through.
-- `boq/` — BOQ, Bill, BOQItem models; `bill_items_save` (the JSON API
-  the grid saves to) and its per-role access rules;
+- `boq/` — BOQ, Bill, BOQItem, VariationOrder models (including
+  `BOQ.create_revision()` and `BOQ.approve()`); `bill_items_save` (the
+  JSON API the grid saves to) and its per-role access rules;
   `static/boq/grid.js` (the manual entry grid's front end);
   `importer.py` (Excel import parsing/validation) and `exporter.py`
   (Excel/PDF export, and the import template download).
@@ -188,6 +189,84 @@ rejects a duplicate reference rather than updating it) — there's no
 cairo libraries; they're present in this sandbox already, but the
 production server will need them installed too (see WeasyPrint's own
 install docs for the target OS).
+
+## BOQ versions, approval and variation orders (step 5)
+
+`/projects/<id>/boq/versions/` lists every version of a project's BOQ —
+Original, Revisions and Variation Orders together, newest first — and
+is where "Create revision" and "Approve" live. A single version's own
+page (`boq_version_detail`) shows those same actions for that version,
+plus links to "All versions" and "Variation orders".
+
+- **Revise BOQ** (rule 4/5) — `BOQ.create_revision()` deep-copies every
+  bill and item of the current **Approved** version into a brand-new
+  Draft (a new version number, `parent_item` links remapped onto the
+  copies, not the originals) — the source version itself is never
+  touched. Only usable from an Approved version, by a QS (or Admin).
+- **Approve** — `BOQ.approve(user)` sets the Draft to Approved, records
+  who and when, and — rule 5, "only one version per project can be
+  Approved at a time" — supersedes whichever version was previously
+  Approved. This is the step 5 acceptance test: *"Approving Rev 1
+  supersedes Original."* Gated on a new `can_approve_boq` (Project
+  Manager or Admin only — Section 2's "Approve BOQ revision or
+  variation" row; a QS can build a revision but not sign it off).
+- **Variation orders** — `/projects/<id>/boq/variation-orders/` lists
+  them and has the "New variation order" form (date, description,
+  reason, instructed by). Creating one needs an existing Approved BOQ
+  (there's nothing to vary from otherwise) and copies it into a new
+  Draft version the same way a revision does — the QS then adds, omits
+  or changes items on it through the ordinary manual-entry grid.
+  `VariationOrder.value_impact` is that version's grand total minus
+  the Approved baseline it was copied from, so it updates live as
+  items are edited. Approving the VO's linked BOQ version also marks
+  the VO itself Approved — Section 2 treats "approve a revision" and
+  "approve a variation" as the same action, so there's one approve
+  button, not two.
+- **Compare versions** — `/projects/<id>/boq/versions/compare/?a=<pk>&b=<pk>`
+  matches every item between the two versions by item reference and
+  reports each as added, removed, changed or unchanged, plus its value
+  difference, alongside the overall grand-total difference. This is
+  the other half of the step 5 acceptance test.
+
+**Scope simplification, disclosed here rather than left implicit:** the
+plain `/boq/` and Excel import/export URLs (no version specified) don't
+take a version id — they resolve to "the most recent Draft in
+progress, or the current Approved version if nothing is in Draft"
+(`views._current_boq`). In the normal flow there's only ever one Draft
+per project at a time (the original before its first approval, or the
+one revision/VO being worked on), so this is unambiguous in practice;
+if it ever isn't, the highest version number wins. Import/export are
+only offered on a version's own page when that page's version *is*
+this current one — visiting a Superseded or an unrelated Draft version
+shows a note pointing at "All versions" instead of a misleading export
+button. Making import/export properly version-scoped (their own
+`boq_pk`-based URLs) is straightforward follow-up work, not done here
+to keep this step's surface area to what the acceptance test needed.
+
+**Not built** (rule 6, deferred until the Store module exists): "an
+item that has stock issued against it cannot be deleted in a later
+version" has nothing to enforce yet — there's no stock issue concept
+until step 6/7. `create_revision()` currently copies every item
+unconditionally; this rule will need revisiting once issues exist.
+
+**Tested:** `boq/test_versions.py` — `create_revision()` (bill/item
+copying, `parent_item` remapping onto the new copies, editing a
+revision leaving the source untouched, version numbering), `approve()`
+(the literal acceptance test — approving Rev 1 supersedes Original —
+plus "only one Approved version" holding across three versions, and
+rejecting an approve on a non-Draft), the revise/approve views'
+permissions (QS can revise/create a VO but not approve; a Viewer can
+do neither), the full VO flow (refused without an Approved BOQ, copies
+the approved version, value impact tracks edits, approving the linked
+BOQ also approves the VO, VO numbers increment per project), and
+`compare_versions` (added/removed/changed/unchanged classification and
+value differences, matching the second half of the acceptance test).
+88 tests pass overall. Also exercised manually end-to-end over real
+HTTP: revise → approve (confirmed Original became Superseded) → create
+a VO → add an item to it → approve it (confirmed the VO's status
+flipped to Approved and its value impact matched the added item's
+amount) → compare two versions (confirmed the diff and value
+difference matched what was actually changed).
 
 ## How project access is scoped (step 2)
 

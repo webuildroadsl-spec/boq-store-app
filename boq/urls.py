@@ -6,6 +6,32 @@ app_name = "boq"
 
 urlpatterns = [
     path("projects/<int:project_pk>/boq/", views.boq_detail, name="boq_detail"),
+    path("projects/<int:project_pk>/boq/versions/", views.boq_list, name="boq_list"),
+    path(
+        "projects/<int:project_pk>/boq/versions/compare/",
+        views.compare_versions,
+        name="compare_versions",
+    ),
+    path(
+        "projects/<int:project_pk>/boq/versions/<int:boq_pk>/",
+        views.boq_version_detail,
+        name="boq_version_detail",
+    ),
+    path(
+        "projects/<int:project_pk>/boq/versions/<int:boq_pk>/revise/",
+        views.create_revision,
+        name="create_revision",
+    ),
+    path(
+        "projects/<int:project_pk>/boq/versions/<int:boq_pk>/approve/",
+        views.approve_boq,
+        name="approve_boq",
+    ),
+    path(
+        "projects/<int:project_pk>/boq/variation-orders/",
+        views.vo_list,
+        name="vo_list",
+    ),
     path(
         "projects/<int:project_pk>/boq/bills/<int:bill_pk>/",
         views.bill_items,

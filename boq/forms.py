@@ -1,12 +1,25 @@
 from django import forms
 
-from .models import BOQItem, Bill
+from .models import BOQItem, Bill, VariationOrder
 
 
 class BillForm(forms.ModelForm):
     class Meta:
         model = Bill
         fields = ["number", "title", "sort_order"]
+
+
+class VariationOrderForm(forms.ModelForm):
+    """
+    The VO's own paperwork fields (date, description, reason, who
+    instructed it) — number, status, base_boq and linked_boq are set by
+    the view, not typed in by the user.
+    """
+
+    class Meta:
+        model = VariationOrder
+        fields = ["date", "description", "reason", "instructed_by"]
+        widgets = {"date": forms.DateInput(attrs={"type": "date"})}
 
 
 class BOQItemForm(forms.ModelForm):

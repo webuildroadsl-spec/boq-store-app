@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+
+{% block title %}Compare BOQ versions — {{ project.code }}{% endblock %}
+
+{% block content %}
+<p><a href="{% url 'boq:boq_list' project.pk %}">&larr; All versions</a></p>
+<h1>Compare BOQ versions — {{ project.code }}</h1>
+
+<form method="get">
+    <label>Version A:
+        <select name="a">
+            {% for boq in boqs %}
+            <option value="{{ boq.pk }}" {% if a_pk == boq.pk|stringformat:"s" %}selected{% endif %}>
+                v{{ boq.version_number }} ({{ boq.get_status_display }})
+            </option>
+            {% endfor %}
+        </select>
+    </label>
+    <label>Version B:
+        <select name="b">
+            {% for boq in boqs %}
+            <option value="{{ boq.pk }}" {% if b_pk == boq.pk|stringformat:"s" %}selected{% endif %}>
+                v{{ boq.version_number }} ({{ boq.get_status_display }})
+            </option>
+            {% endfor %}
+        </select>
+    </label>
+    <button type="submit">Compare</button>
+</form>
+
+{% if boq_a and boq_b %}
+<h2>v{{ boq_a.version_number }} vs v{{ boq_b.version_number }}</h2>
+<p>Grand total: {{ boq_a.grand_total }} &rarr; {{ boq_b.grand_total }}
+    (value difference: <strong>{{ value_difference }}</strong>)</p>
+
+<table border="1" cellpadding="4">
+    <thead>
+        <tr>
+            <th>Item ref</th>
+            <th>Status</th>
+            <th>v{{ boq_a.version_number }} description</th>
+            <th>v{{ boq_a.version_number }} amount</th>
+            <th>v{{ boq_b.version_number }} description</th>
+            <th>v{{ boq_b.version_number }} amount</th>
+            <th>Value difference</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for row in rows %}
+        {% if row.status != "unchanged" %}
+        <tr>
+            <td>{{ row.reference }}</td>
+            <td>{{ row.status }}</td>
+            <td>{{ row.item_a.description|default:"—" }}</td>
+            <td>{{ row.item_a.amount|default:"" }}</td>
+            <td>{{ row.item_b.description|default:"—" }}</td>
+            <td>{{ row.item_b.amount|default:"" }}</td>
+            <td>{{ row.value_difference }}</td>
+        </tr>
+        {% endif %}
+        {% endfor %}
+    </tbody>
+</table>
+<p><small>Unchanged items aren't shown. {{ rows|length }} item reference(s) compared in total.</small></p>
+{% endif %}
+{% endblock %}

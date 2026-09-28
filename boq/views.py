@@ -12,13 +12,16 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.views.decorators.http import require_GET, require_POST
 from django.db import transaction
+from django.db.models import Max
+
+from django.utils import timezone
 
 from core.models import Project, UnitOfMeasure
-from core.permissions import can_edit_boq, can_view_boq, user_can_access_project
+from core.permissions import can_approve_boq, can_edit_boq, can_view_boq, user_can_access_project
 
 from . import exporter, importer
-from .forms import BillForm, BOQItemForm
-from .models import BOQ, Bill, BOQItem
+from .forms import BillForm, BOQItemForm, VariationOrderForm
+from .models import BOQ, Bill, BOQItem, VariationOrder
 
 IMPORT_TMP_DIR = os.path.join(settings.BASE_DIR, "boq", "import_tmp")
 
@@ -39,17 +42,29 @@ def _get_project_and_check_boq_access(request, project_pk):
     return project
 
 
-def _get_or_create_boq(project):
+def _current_boq(project):
     """
-    The project's current (only, for now) BOQ version. Versions and
-    approval are step 5's work, so every view before then works
-    against this single Draft/Original v1.
+    The BOQ version the plain "/boq/" URL (no version specified) shows
+    and edits by default: the most recent Draft in progress if there is
+    one (there's normally at most one — either the original before its
+    first approval, or a revision/VO being worked on now), else the
+    current Approved version (view-only at that point), else whichever
+    version is newest, else a brand-new v1 Draft if the project has no
+    BOQ at all yet — Section 4.2's "Create BOQ manually" starts from an
+    empty BOQ, not a form asking to create one.
+
+    A specific version, once it exists, is always reachable by its own
+    URL (`boq_version_detail`) regardless of which one this picks.
     """
-    boq, _ = BOQ.objects.get_or_create(
-        project=project,
-        version_number=1,
-        defaults={"type": BOQ.TYPE_ORIGINAL, "status": BOQ.STATUS_DRAFT},
-    )
+    boq = project.boqs.filter(status=BOQ.STATUS_DRAFT).order_by("-version_number").first()
+    if boq is None:
+        boq = project.boqs.filter(status=BOQ.STATUS_APPROVED).order_by("-version_number").first()
+    if boq is None:
+        boq = project.boqs.order_by("-version_number").first()
+    if boq is None:
+        boq = BOQ.objects.create(
+            project=project, version_number=1, type=BOQ.TYPE_ORIGINAL, status=BOQ.STATUS_DRAFT
+        )
     return boq
 
 
@@ -60,30 +75,21 @@ def _require_boq_editable(request, project, boq):
         raise PermissionDenied("Only a Draft BOQ version can be edited.")
 
 
-@login_required
-def boq_detail(request, project_pk):
-    """
-    The current BOQ for a project: its bills, each bill's total, and the
-    grand total. Creates the project's first (Draft, Original, v1) BOQ
-    on first visit if one doesn't exist yet — Section 4.2's "Create BOQ
-    manually" starts from an empty BOQ, not a form asking to create one.
-    """
-    project = _get_project_and_check_boq_access(request, project_pk)
-    boq = _get_or_create_boq(project)
-
+def _render_boq_detail(request, project, boq):
+    """Shared by `boq_detail` (the default version) and
+    `boq_version_detail` (an explicit one): bills, totals, the
+    add-a-bill form, and — for this version's own status — the
+    revise/approve actions `boq_list` links to."""
     can_edit = can_edit_boq(request.user, project)
 
     if request.method == "POST":
-        if not can_edit:
-            raise PermissionDenied("Your role cannot edit the BOQ.")
-        if not boq.is_editable:
-            raise PermissionDenied("Only a Draft BOQ version can be edited.")
+        _require_boq_editable(request, project, boq)
         bill_form = BillForm(request.POST)
         if bill_form.is_valid():
             bill = bill_form.save(commit=False)
             bill.boq = boq
             bill.save()
-            return redirect("boq:boq_detail", project_pk=project.pk)
+            return redirect("boq:boq_version_detail", project_pk=project.pk, boq_pk=boq.pk)
     else:
         bill_form = BillForm(initial={"number": boq.bills.count() + 1})
 
@@ -96,8 +102,209 @@ def boq_detail(request, project_pk):
             "bills": boq.bills.all(),
             "bill_form": bill_form,
             "can_edit": can_edit,
+            "can_approve": can_approve_boq(request.user, project),
+            "variation_order": getattr(boq, "variation_order", None),
+            # Import/export (still project-wide, not per-version — see
+            # the README's step 5 notes) only make sense to offer from
+            # the version they'd actually act on.
+            "is_current": boq.pk == _current_boq(project).pk,
         },
     )
+
+
+@login_required
+def boq_detail(request, project_pk):
+    """The default BOQ view for a project — see `_current_boq`."""
+    project = _get_project_and_check_boq_access(request, project_pk)
+    boq = _current_boq(project)
+    return _render_boq_detail(request, project, boq)
+
+
+@login_required
+def boq_version_detail(request, project_pk, boq_pk):
+    """One specific BOQ version, by id — how `boq_list`, `compare_versions`
+    and "create revision"/"new VO" link to a version that isn't
+    necessarily the default one `boq_detail` would show."""
+    project = _get_project_and_check_boq_access(request, project_pk)
+    boq = get_object_or_404(BOQ, pk=boq_pk, project=project)
+    return _render_boq_detail(request, project, boq)
+
+
+@login_required
+def boq_list(request, project_pk):
+    """
+    Every version of this project's BOQ (Section 4.2's "Compare
+    versions" starting point, and where "Create revision" / "New
+    variation order" live) — original, revisions, and VOs together,
+    newest first.
+    """
+    project = _get_project_and_check_boq_access(request, project_pk)
+    boqs = project.boqs.select_related("approved_by").order_by("-version_number")
+    current_approved = boqs.filter(status=BOQ.STATUS_APPROVED).first()
+    return render(
+        request,
+        "boq/boq_list.html",
+        {
+            "project": project,
+            "boqs": boqs,
+            "current_approved": current_approved,
+            "can_edit": can_edit_boq(request.user, project),
+            "can_approve": can_approve_boq(request.user, project),
+        },
+    )
+
+
+@login_required
+@require_POST
+def create_revision(request, project_pk, boq_pk):
+    """
+    Section 4.2's "Revise BOQ": "copying an approved BOQ creates a new
+    Draft version." Only makes sense starting from the current Approved
+    version — copying a Draft would just be a second, redundant Draft,
+    and copying a Superseded one would resurrect old figures instead of
+    revising the current contract.
+    """
+    project = _get_project_and_check_boq_access(request, project_pk)
+    boq = get_object_or_404(BOQ, pk=boq_pk, project=project)
+    if not can_edit_boq(request.user, project):
+        raise PermissionDenied("Your role cannot edit the BOQ.")
+    if boq.status != BOQ.STATUS_APPROVED:
+        raise PermissionDenied("Only the Approved version can be revised.")
+    new_boq = boq.create_revision()
+    messages.success(request, f"Created v{new_boq.version_number} (Revision) as a new Draft.")
+    return redirect("boq:boq_version_detail", project_pk=project.pk, boq_pk=new_boq.pk)
+
+
+@login_required
+@require_POST
+def approve_boq(request, project_pk, boq_pk):
+    """
+    Rules 4/5/8: approves this Draft version, superseding whichever
+    version was previously Approved on the project — the step 5
+    acceptance test ("Approving Rev 1 supersedes Original").
+    """
+    project = _get_project_and_check_boq_access(request, project_pk)
+    boq = get_object_or_404(BOQ, pk=boq_pk, project=project)
+    if not can_approve_boq(request.user, project):
+        raise PermissionDenied("Your role cannot approve a BOQ version.")
+    if boq.status != BOQ.STATUS_DRAFT:
+        raise PermissionDenied("Only a Draft version can be approved.")
+    boq.approve(request.user)
+    messages.success(
+        request, f"v{boq.version_number} is now Approved. Any previous Approved version is now Superseded."
+    )
+    return redirect("boq:boq_version_detail", project_pk=project.pk, boq_pk=boq.pk)
+
+
+@login_required
+def vo_list(request, project_pk):
+    """Every variation order on this project, and the "New variation order" form."""
+    project = _get_project_and_check_boq_access(request, project_pk)
+    can_edit = can_edit_boq(request.user, project)
+    current_approved = project.boqs.filter(status=BOQ.STATUS_APPROVED).order_by("-version_number").first()
+
+    if request.method == "POST":
+        if not can_edit:
+            raise PermissionDenied("Your role cannot create a variation order.")
+        if current_approved is None:
+            messages.error(
+                request, "You need an Approved BOQ version before you can create a variation order."
+            )
+            return redirect("boq:vo_list", project_pk=project.pk)
+        form = VariationOrderForm(request.POST)
+        if form.is_valid():
+            new_boq = current_approved.create_revision(revision_type=BOQ.TYPE_VARIATION)
+            next_number = (
+                project.variation_orders.aggregate(highest=Max("number"))["highest"] or 0
+            ) + 1
+            vo = form.save(commit=False)
+            vo.project = project
+            vo.number = next_number
+            vo.base_boq = current_approved
+            vo.linked_boq = new_boq
+            vo.save()
+            messages.success(
+                request, f"VO {vo.number} created as v{new_boq.version_number} — add, omit or change items, then approve it."
+            )
+            return redirect("boq:boq_version_detail", project_pk=project.pk, boq_pk=new_boq.pk)
+    else:
+        form = VariationOrderForm(initial={"date": timezone.localdate()})
+
+    return render(
+        request,
+        "boq/vo_list.html",
+        {
+            "project": project,
+            "variation_orders": project.variation_orders.select_related("linked_boq", "base_boq"),
+            "form": form,
+            "can_edit": can_edit,
+            "current_approved": current_approved,
+        },
+    )
+
+
+@login_required
+def compare_versions(request, project_pk):
+    """
+    Section 4.2's "Compare versions": pick any two of this project's
+    BOQ versions and see, item by item (matched by item_reference),
+    what was added, removed or changed, plus the overall value
+    difference — the other half of the step 5 acceptance test.
+    """
+    project = _get_project_and_check_boq_access(request, project_pk)
+    boqs = project.boqs.order_by("-version_number")
+
+    a_pk = request.GET.get("a")
+    b_pk = request.GET.get("b")
+    context = {"project": project, "boqs": boqs, "a_pk": a_pk, "b_pk": b_pk}
+
+    if a_pk and b_pk:
+        boq_a = get_object_or_404(BOQ, pk=a_pk, project=project)
+        boq_b = get_object_or_404(BOQ, pk=b_pk, project=project)
+        context.update(
+            {
+                "boq_a": boq_a,
+                "boq_b": boq_b,
+                "rows": _compare_boq_versions(boq_a, boq_b),
+                "value_difference": boq_b.grand_total - boq_a.grand_total,
+            }
+        )
+
+    return render(request, "boq/compare.html", context)
+
+
+def _compare_boq_versions(boq_a, boq_b):
+    """
+    One row per item_reference that appears in either version:
+    "added" (only in b), "removed" (only in a), "changed" (in both but
+    some field differs), or "unchanged". Headings compare by
+    description only, since they carry no quantity/rate/amount.
+    """
+    items_a = {item.item_reference: item for bill in boq_a.bills.all() for item in bill.items.all()}
+    items_b = {item.item_reference: item for bill in boq_b.bills.all() for item in bill.items.all()}
+
+    rows = []
+    for reference in sorted(set(items_a) | set(items_b)):
+        item_a = items_a.get(reference)
+        item_b = items_b.get(reference)
+        if item_a is None:
+            status = "added"
+        elif item_b is None:
+            status = "removed"
+        else:
+            fields = ("description", "item_type", "unit_id", "quantity", "rate", "amount")
+            status = "changed" if any(getattr(item_a, f) != getattr(item_b, f) for f in fields) else "unchanged"
+        rows.append(
+            {
+                "reference": reference,
+                "item_a": item_a,
+                "item_b": item_b,
+                "status": status,
+                "value_difference": (item_b.amount if item_b and item_b.amount else Decimal("0.00"))
+                - (item_a.amount if item_a and item_a.amount else Decimal("0.00")),
+            }
+        )
+    return rows
 
 
 def _item_to_dict(item):
@@ -264,7 +471,7 @@ def bill_items_save(request, project_pk, bill_pk):
 @login_required
 def export_xlsx(request, project_pk):
     project = _get_project_and_check_boq_access(request, project_pk)
-    boq = _get_or_create_boq(project)
+    boq = _current_boq(project)
     content = exporter.export_xlsx_bytes(boq)
     response = HttpResponse(
         content,
@@ -279,7 +486,7 @@ def export_xlsx(request, project_pk):
 @login_required
 def export_pdf(request, project_pk):
     project = _get_project_and_check_boq_access(request, project_pk)
-    boq = _get_or_create_boq(project)
+    boq = _current_boq(project)
     content = exporter.export_pdf_bytes(boq)
     response = HttpResponse(content, content_type="application/pdf")
     response["Content-Disposition"] = (
@@ -352,7 +559,7 @@ def _valid_token_path(token):
 def import_upload(request, project_pk):
     """GET: the upload form. POST: save the file and show the mapping/preview screen."""
     project = _get_project_and_check_boq_access(request, project_pk)
-    boq = _get_or_create_boq(project)
+    boq = _current_boq(project)
     _require_boq_editable(request, project, boq)
 
     if request.method == "POST":
@@ -395,7 +602,7 @@ def import_upload(request, project_pk):
 def import_preview(request, project_pk):
     """The "Update preview" button: re-parses the same uploaded file with an adjusted mapping."""
     project = _get_project_and_check_boq_access(request, project_pk)
-    boq = _get_or_create_boq(project)
+    boq = _current_boq(project)
     _require_boq_editable(request, project, boq)
 
     path = _valid_token_path(request.POST.get("token", ""))
@@ -420,7 +627,7 @@ def import_confirm(request, project_pk):
     there is no partial import.
     """
     project = _get_project_and_check_boq_access(request, project_pk)
-    boq = _get_or_create_boq(project)
+    boq = _current_boq(project)
     _require_boq_editable(request, project, boq)
 
     token = request.POST.get("token", "")
@@ -491,7 +698,7 @@ def import_confirm(request, project_pk):
 def import_template(request, project_pk):
     """Downloads a blank .xlsx with the flat-layout header row and a couple of example rows."""
     project = _get_project_and_check_boq_access(request, project_pk)
-    _get_or_create_boq(project)  # just to reuse the same access check as the rest of import/export
+    _current_boq(project)  # just to reuse the same access check as the rest of import/export
     content = exporter.build_import_template_bytes()
     response = HttpResponse(
         content,

@@ -3,8 +3,31 @@
 {% block title %}BOQ — {{ project.code }}{% endblock %}
 
 {% block content %}
-<p><a href="{% url 'core:project_detail' project.pk %}">&larr; {{ project.code }}</a></p>
-<h1>BOQ — {{ project.code }} (v{{ boq.version_number }}, {{ boq.get_status_display }})</h1>
+<p>
+    <a href="{% url 'core:project_detail' project.pk %}">&larr; {{ project.code }}</a>
+    &nbsp;|&nbsp;
+    <a href="{% url 'boq:boq_list' project.pk %}">All versions</a>
+    &nbsp;|&nbsp;
+    <a href="{% url 'boq:vo_list' project.pk %}">Variation orders</a>
+</p>
+<h1>BOQ — {{ project.code }} (v{{ boq.version_number }}, {{ boq.get_type_display }}, {{ boq.get_status_display }})</h1>
+
+{% if variation_order %}
+<p>This version is <strong>VO {{ variation_order.number }}</strong>: {{ variation_order.description }}
+    (value impact so far: {{ variation_order.value_impact }}).</p>
+{% endif %}
+
+{% if boq.status == "approved" %}
+<form method="post" action="{% url 'boq:create_revision' project.pk boq.pk %}" style="display:inline">
+    {% csrf_token %}
+    <button type="submit" {% if not can_edit %}disabled{% endif %}>Create a new revision from this version</button>
+</form>
+{% elif boq.status == "draft" %}
+<form method="post" action="{% url 'boq:approve_boq' project.pk boq.pk %}" style="display:inline">
+    {% csrf_token %}
+    <button type="submit" {% if not can_approve %}disabled{% endif %}>Approve this version</button>
+</form>
+{% endif %}
 
 <table border="1" cellpadding="4">
     <thead>
@@ -42,6 +65,7 @@
 </form>
 {% endif %}
 
+{% if is_current %}
 <h2>Export</h2>
 <p>
     <a href="{% url 'boq:export_xlsx' project.pk %}">Download as Excel (.xlsx)</a>
@@ -56,5 +80,9 @@
     &nbsp;|&nbsp;
     <a href="{% url 'boq:import_upload' project.pk %}">Import a BOQ from Excel</a>
 </p>
+{% endif %}
+{% else %}
+<p><em>Export and Excel import act on the project's current version — open it from
+    <a href="{% url 'boq:boq_list' project.pk %}">All versions</a> to use them.</em></p>
 {% endif %}
 {% endblock %}

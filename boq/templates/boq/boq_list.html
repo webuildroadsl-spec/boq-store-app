@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+
+{% block title %}BOQ versions — {{ project.code }}{% endblock %}
+
+{% block content %}
+<p><a href="{% url 'boq:boq_detail' project.pk %}">&larr; BOQ — {{ project.code }}</a></p>
+<h1>BOQ versions — {{ project.code }}</h1>
+
+<p>
+    <a href="{% url 'boq:vo_list' project.pk %}">Variation orders</a>
+    &nbsp;|&nbsp;
+    <a href="{% url 'boq:compare_versions' project.pk %}">Compare two versions</a>
+</p>
+
+<table border="1" cellpadding="4">
+    <thead>
+        <tr>
+            <th>Version</th>
+            <th>Type</th>
+            <th>Status</th>
+            <th>Grand total</th>
+            <th>Approved by</th>
+            <th>Approved date</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for boq in boqs %}
+        <tr>
+            <td><a href="{% url 'boq:boq_version_detail' project.pk boq.pk %}">v{{ boq.version_number }}</a></td>
+            <td>{{ boq.get_type_display }}</td>
+            <td>{{ boq.get_status_display }}</td>
+            <td>{{ boq.grand_total }}</td>
+            <td>{{ boq.approved_by|default:"" }}</td>
+            <td>{{ boq.approved_date|default:"" }}</td>
+            <td>
+                {% if boq.status == "approved" and can_edit %}
+                <form method="post" action="{% url 'boq:create_revision' project.pk boq.pk %}">
+                    {% csrf_token %}
+                    <button type="submit">Create revision</button>
+                </form>
+                {% elif boq.status == "draft" and can_approve %}
+                <form method="post" action="{% url 'boq:approve_boq' project.pk boq.pk %}">
+                    {% csrf_token %}
+                    <button type="submit">Approve</button>
+                </form>
+                {% endif %}
+            </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="7">No BOQ versions yet.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}
