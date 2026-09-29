@@ -6,10 +6,13 @@ movements — never typed in or stored as a running total anywhere.
 Step 6 built the master data (Item category, Store, Store item,
 Supplier) and the first posted document, GRN (goods received). Step 7
 added Requisition, Issue and Return (Section 5.2 points 1, 3 and 5).
-Step 8 adds Transfer and Stock count (points 4 and 6), plus a generic
+Step 8 added Transfer and Stock count (points 4 and 6), plus a generic
 `DocumentReversal` for Section 2's rule "Posted documents ... cannot be
 edited or deleted; mistakes are corrected with a reversing document."
-Material allowances (the BOQ-Store link) are step 9.
+Step 9 adds `MaterialAllowance` and the material reconciliation this
+links to the BOQ module (Section 6): how much of each store item one
+unit of a BOQ item's work consumes, and the "used vs allowed" report
+that compares them.
 
 Item category, Store item and Supplier are managed through /admin/,
 the same way Company/UnitOfMeasure/ProjectMembership already are (see
@@ -405,11 +408,25 @@ class Issue(models.Model):
     every line still needs its own `boq_item` regardless -- that's the
     step 7 acceptance test's second half: "issue without a BOQ item is
     blocked."
+
+    Step 9 adds Section 6 rule 2: "When a new issue would push net
+    issued above allowed, the system warns the Storekeeper and routes
+    the issue to a Project Manager for approval with a reason." A
+    third status, `STATUS_PENDING_APPROVAL`, holds an over-allowance
+    issue with no stock movement yet -- the point of catching this
+    "before it becomes a loss" (Section 6's own framing) is to *not*
+    let the material leave until someone with authority has looked at
+    it, not to post it anyway and flag it after the fact.
     """
 
     STATUS_DRAFT = "draft"
+    STATUS_PENDING_APPROVAL = "pending_approval"
     STATUS_POSTED = "posted"
-    STATUS_CHOICES = [(STATUS_DRAFT, "Draft"), (STATUS_POSTED, "Posted")]
+    STATUS_CHOICES = [
+        (STATUS_DRAFT, "Draft"),
+        (STATUS_PENDING_APPROVAL, "Pending Project Manager approval"),
+        (STATUS_POSTED, "Posted"),
+    ]
 
     number = models.PositiveIntegerField()
     date = models.DateField()
@@ -418,7 +435,19 @@ class Issue(models.Model):
         StoreRequisition, on_delete=models.PROTECT, null=True, blank=True, related_name="issues"
     )
     issued_to = models.CharField(max_length=255, help_text="A person or a plant/vehicle.")
-    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default=STATUS_DRAFT)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_DRAFT)
+    # Who submitted the post() attempt that turned out to be over
+    # allowance -- needed so approve_over_allowance() can enforce
+    # Section 2's "No user can approve their own ... over-allowance
+    # issue." Nullable because ordinary (never-over-allowance) issues
+    # never need it.
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="+"
+    )
+    over_allowance_reason = models.CharField(max_length=255, blank=True)
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="+"
+    )
 
     class Meta:
         ordering = ["store", "number"]
@@ -433,25 +462,12 @@ class Issue(models.Model):
     def is_editable(self):
         return self.status == self.STATUS_DRAFT
 
-    def post(self, user):
-        """
-        Rule (step 7 acceptance test): issuing more than is in stock is
-        blocked, and every line must carry a BOQ item. Both are
-        checked for *every* line before anything is written -- one bad
-        line blocks the whole issue, same all-or-nothing reasoning as
-        the BOQ Excel import and GRN posting.
-
-        The unit cost recorded on each movement is the store's current
-        weighted-average cost for that item, taken once at the start of
-        posting (not per line), so two lines for the same item in one
-        issue don't see a different cost mid-way through.
-        """
-        if self.status != self.STATUS_DRAFT:
-            raise ValidationError("Only a Draft issue can be posted.")
-        lines = list(self.lines.select_related("item"))
-        if not lines:
-            raise ValidationError("An issue needs at least one line before it can be posted.")
-
+    def _check_stock_and_boq_item(self, lines):
+        """The step 7 checks, unchanged: every line needs a BOQ item,
+        and no item's requested quantity (summed across the issue) may
+        exceed what's on hand. Shared between post() and
+        approve_over_allowance(), since stock may have moved between
+        the two."""
         errors = []
         cost_by_item = {}
         requested_by_item = {}
@@ -469,27 +485,130 @@ class Issue(models.Model):
                     f"{available} {item.unit.code} in stock at {self.store.code}."
                 )
             cost_by_item[item_id] = average_cost
-
         if errors:
             raise ValidationError(errors)
+        return cost_by_item
+
+    def _check_material_allowance(self, lines):
+        """
+        Section 6 rule 2: for every (BOQ item, store item) pair this
+        issue's lines touch that has a `MaterialAllowance` set, would
+        posting push net issued above allowed? Grouped per pair (not
+        just per item) since two lines could charge the same store
+        item to different BOQ items, each with its own allowance.
+        Pairs with no allowance set are skipped entirely -- Section 6
+        only reconciles material the QS has actually set an allowance
+        for.
+        """
+        requested_by_pair = {}
+        for line in lines:
+            key = (line.boq_item_id, line.item_id)
+            requested_by_pair[key] = requested_by_pair.get(key, Decimal("0")) + line.quantity
+
+        warnings = []
+        for (boq_item_id, item_id), requested in requested_by_pair.items():
+            allowance = MaterialAllowance.objects.filter(boq_item_id=boq_item_id, store_item_id=item_id).first()
+            if allowance is None:
+                continue
+            recon = allowance.reconciliation()
+            if recon["net_issued"] + requested > recon["allowed"]:
+                item = next(l.item for l in lines if l.item_id == item_id)
+                warnings.append(
+                    f"{item.code} against {allowance.boq_item.item_reference}: issuing {requested} "
+                    f"{item.unit.code} would bring net issued to {recon['net_issued'] + requested} "
+                    f"{item.unit.code}, above the {recon['allowed']} {item.unit.code} allowed."
+                )
+        return warnings
+
+    def post(self, user, over_allowance_reason=""):
+        """
+        Rule (step 7 acceptance test): issuing more than is in stock is
+        blocked, and every line must carry a BOQ item. Both are
+        checked for *every* line before anything is written -- one bad
+        line blocks the whole issue, same all-or-nothing reasoning as
+        the BOQ Excel import and GRN posting.
+
+        Rule (step 9, Section 6 rule 2): if any line would push net
+        issued above its BOQ item's material allowance, this doesn't
+        post at all -- it's held as Pending Project Manager approval
+        instead, with no stock movement yet, unless `over_allowance_reason`
+        is given (in which case it's still held pending, but the
+        reason is recorded so the PM has something to approve against).
+
+        The unit cost recorded on each movement is the store's current
+        weighted-average cost for that item, taken once at the start of
+        posting (not per line), so two lines for the same item in one
+        issue don't see a different cost mid-way through.
+        """
+        if self.status != self.STATUS_DRAFT:
+            raise ValidationError("Only a Draft issue can be posted.")
+        lines = list(self.lines.select_related("item", "boq_item"))
+        if not lines:
+            raise ValidationError("An issue needs at least one line before it can be posted.")
+
+        cost_by_item = self._check_stock_and_boq_item(lines)
+        allowance_warnings = self._check_material_allowance(lines)
+
+        if allowance_warnings and not over_allowance_reason:
+            raise ValidationError(
+                allowance_warnings
+                + ["Provide a reason to route this issue to a Project Manager for approval."]
+            )
 
         with transaction.atomic():
-            for line in lines:
-                StockMovement.objects.create(
-                    store=self.store,
-                    item=line.item,
-                    quantity=-line.quantity,
-                    unit_cost=cost_by_item[line.item_id],
-                    document_type=StockMovement.DOCUMENT_ISSUE,
-                    document_id=self.pk,
-                    boq_item_id=line.boq_item_id,
-                    section_id=line.section_id,
-                    created_by=user,
-                )
-            self.status = self.STATUS_POSTED
+            if allowance_warnings:
+                self.created_by = user
+                self.over_allowance_reason = over_allowance_reason
+                self.status = self.STATUS_PENDING_APPROVAL
+                self.save()
+            else:
+                self._post_movements(lines, cost_by_item, user)
+
+    def _post_movements(self, lines, cost_by_item, user):
+        """The actual posting -- creating one StockMovement per line
+        and marking this issue Posted. Shared by post() (the ordinary,
+        within-allowance path) and approve_over_allowance() (once a
+        Project Manager has signed off)."""
+        for line in lines:
+            StockMovement.objects.create(
+                store=self.store,
+                item=line.item,
+                quantity=-line.quantity,
+                unit_cost=cost_by_item[line.item_id],
+                document_type=StockMovement.DOCUMENT_ISSUE,
+                document_id=self.pk,
+                boq_item_id=line.boq_item_id,
+                section_id=line.section_id,
+                created_by=user,
+            )
+        self.status = self.STATUS_POSTED
+        self.save()
+        if self.requisition_id:
+            self.requisition.update_status()
+
+    def approve_over_allowance(self, user):
+        """
+        Section 2's rule: "No user can approve their own ... over-
+        allowance issue" -- checked directly against `created_by`,
+        not left to the role permission to happen to keep them apart.
+        Stock and BOQ-item validity are re-checked from scratch (not
+        just trusted from post() time), since time has passed and
+        stock may have moved -- same "never trust a single layer, and
+        never trust a stale check" habit as Transfer's frozen cost and
+        every other posting action here.
+        """
+        if self.status != self.STATUS_PENDING_APPROVAL:
+            raise ValidationError("Only an issue pending approval can be approved.")
+        if self.created_by_id and user.id == self.created_by_id:
+            raise ValidationError(
+                "The person who submitted this issue for approval cannot approve it themselves."
+            )
+        lines = list(self.lines.select_related("item", "boq_item"))
+        cost_by_item = self._check_stock_and_boq_item(lines)
+        with transaction.atomic():
+            self._post_movements(lines, cost_by_item, user)
+            self.approved_by = user
             self.save()
-            if self.requisition_id:
-                self.requisition.update_status()
 
     @property
     def is_reversed(self):
@@ -989,3 +1108,112 @@ class DocumentReversal(models.Model):
                     created_by=user,
                 )
         return reversal
+
+
+class MaterialAllowance(models.Model):
+    """
+    Section 6: "the QS sets, per BOQ item, how much of each store item
+    one unit of work consumes, plus a wastage percentage." Example
+    from the spec: 1 m³ of Class 20 concrete in culverts = 0.32 t
+    cement, wastage 5%. One row per (BOQ item, store item) pair, since
+    a single BOQ item's work can consume several store items (concrete
+    needs cement *and* sand *and* aggregate, each its own row).
+    """
+
+    boq_item = models.ForeignKey(
+        "boq.BOQItem", on_delete=models.CASCADE, related_name="material_allowances"
+    )
+    store_item = models.ForeignKey(StoreItem, on_delete=models.PROTECT, related_name="+")
+    quantity_per_unit = models.DecimalField(
+        max_digits=10, decimal_places=4, help_text="e.g. 0.32 (t of cement per m³ of concrete)."
+    )
+    wastage_percent = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("0"))
+
+    class Meta:
+        ordering = ["boq_item", "store_item"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["boq_item", "store_item"], name="unique_allowance_per_boq_item_and_store_item"
+            )
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.boq_item.item_reference}: {self.quantity_per_unit} {self.store_item.unit.code} "
+            f"{self.store_item.code} (+{self.wastage_percent}% wastage)"
+        )
+
+    @property
+    def allowed_quantity(self):
+        """
+        Section 6's formula: `Allowed = Quantity executed (or BOQ
+        quantity) × allowance per unit × (1 + wastage %)`. Rule 1 says
+        this switches to "quantity executed to date" once measurement
+        (Phase 3) is built; that half has nothing to switch to yet, so
+        only the BOQ-quantity branch is implemented here -- a
+        disclosed simplification, not an oversight.
+        """
+        boq_quantity = self.boq_item.quantity or Decimal("0")
+        return (boq_quantity * self.quantity_per_unit * (1 + self.wastage_percent / Decimal("100"))).quantize(
+            Decimal("0.001"), rounding=ROUND_HALF_UP
+        )
+
+    def reconciliation(self):
+        """
+        Section 6's "used vs allowed", for this BOQ item / store item
+        pair, project-wide (a BOQ item's material can move through any
+        of the project's stores, and Section 6 doesn't scope
+        reconciliation to one store). `Net issued = Issued - Returned`
+        and `Variance = Net issued - Allowed` are exactly the spec's
+        own formulas; the flag applies rule 4's 5%/10% thresholds,
+        read from `Project.variance_*_threshold_percent` rather than
+        hard-coded, to the variance's *absolute* percentage of what
+        was allowed (the spec doesn't say whether under-use should
+        flag the same way as over-use, so this treats them the same).
+
+        The value figure (rule 3: "quantity × weighted average cost")
+        uses the average cost actually recorded on this pair's own
+        Issue movements — there's no single project-wide "the" average
+        cost when the same item sits in several stores at different
+        costs, so this is the average of what was actually issued
+        against this BOQ item, a disclosed simplification.
+        """
+        project = self.boq_item.bill.boq.project
+        movements = StockMovement.objects.filter(boq_item=self.boq_item, item=self.store_item, store__project=project)
+        issue_totals = movements.filter(document_type=StockMovement.DOCUMENT_ISSUE).aggregate(
+            quantity=models.Sum("quantity"), cost=models.Sum("total_cost")
+        )
+        issued = -(issue_totals["quantity"] or Decimal("0"))
+        issued_cost = -(issue_totals["cost"] or Decimal("0"))
+        returned = movements.filter(document_type=StockMovement.DOCUMENT_RETURN).aggregate(
+            total=models.Sum("quantity")
+        )["total"] or Decimal("0")
+
+        net_issued = issued - returned
+        allowed = self.allowed_quantity
+        variance = net_issued - allowed
+        variance_percent = (
+            (variance / allowed * 100).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) if allowed else Decimal("0")
+        )
+        average_issue_cost = (issued_cost / issued).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) if issued else Decimal("0")
+        value_variance = (variance * average_issue_cost).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+        abs_percent = abs(variance_percent)
+        if abs_percent > project.variance_red_threshold_percent:
+            flag = "red"
+        elif abs_percent > project.variance_amber_threshold_percent:
+            flag = "amber"
+        else:
+            flag = "green"
+
+        return {
+            "allowance": self,
+            "issued": issued,
+            "returned": returned,
+            "net_issued": net_issued,
+            "allowed": allowed,
+            "variance": variance,
+            "variance_percent": variance_percent,
+            "value_variance": value_variance,
+            "flag": flag,
+        }

@@ -80,6 +80,11 @@ urlpatterns = [
         name="issue_reverse",
     ),
     path(
+        "projects/<int:project_pk>/stores/<int:store_pk>/issues/<int:issue_pk>/approve-over-allowance/",
+        views.issue_approve_over_allowance,
+        name="issue_approve_over_allowance",
+    ),
+    path(
         "projects/<int:project_pk>/stores/<int:store_pk>/returns/",
         views.return_list,
         name="return_list",
@@ -152,5 +157,27 @@ urlpatterns = [
         "projects/<int:project_pk>/stores/<int:store_pk>/stock-counts/<int:stock_count_pk>/approve/",
         views.stock_count_approve,
         name="stock_count_approve",
+    ),
+    # Material allowances and reconciliation (Section 6) are project-
+    # scoped -- a BOQ item's allowance isn't tied to any one store.
+    path(
+        "projects/<int:project_pk>/material-allowances/",
+        views.material_allowance_list,
+        name="material_allowance_list",
+    ),
+    path(
+        "projects/<int:project_pk>/material-allowances/new/",
+        views.material_allowance_create,
+        name="material_allowance_create",
+    ),
+    path(
+        "projects/<int:project_pk>/material-allowances/<int:allowance_pk>/delete/",
+        views.material_allowance_delete,
+        name="material_allowance_delete",
+    ),
+    path(
+        "projects/<int:project_pk>/reconciliation/",
+        views.reconciliation_report,
+        name="reconciliation_report",
     ),
 ]

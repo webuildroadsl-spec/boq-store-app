@@ -13,6 +13,10 @@
     <a href="{% url 'store:requisition_list' project.pk %}">Requisitions</a>
     &nbsp;|&nbsp;
     <a href="{% url 'store:transfer_list' project.pk %}">Transfers</a>
+    &nbsp;|&nbsp;
+    <a href="{% url 'store:material_allowance_list' project.pk %}">Material allowances</a>
+    &nbsp;|&nbsp;
+    <a href="{% url 'store:reconciliation_report' project.pk %}">Reconciliation report</a>
 </p>
 <dl>
     <dt>Client</dt><dd>{{ project.client|default:"—" }}</dd>

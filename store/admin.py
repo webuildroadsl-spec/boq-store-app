@@ -8,6 +8,7 @@ from .models import (
     Issue,
     IssueLine,
     ItemCategory,
+    MaterialAllowance,
     RequisitionLine,
     ReturnLine,
     ReturnToStore,
@@ -136,3 +137,10 @@ class StockCountAdmin(admin.ModelAdmin):
 class DocumentReversalAdmin(admin.ModelAdmin):
     list_display = ("document_type", "document_id", "reversed_by", "created_at")
     list_filter = ("document_type",)
+
+
+@admin.register(MaterialAllowance)
+class MaterialAllowanceAdmin(admin.ModelAdmin):
+    list_display = ("boq_item", "store_item", "quantity_per_unit", "wastage_percent")
+    list_filter = ("store_item",)
+    search_fields = ("boq_item__item_reference", "store_item__code", "store_item__name")

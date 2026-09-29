@@ -5,6 +5,8 @@ BOQ and Store modules (built in later steps) will hang their tables off
 Project and Section defined here.
 """
 
+from decimal import Decimal
+
 from django.conf import settings
 from django.db import models
 
@@ -137,6 +139,13 @@ class Project(models.Model):
         through="ProjectMembership",
         related_name="projects",
     )
+
+    # Section 6 rule 4: "Variance above 5% shows amber; above 10%
+    # shows red. Thresholds are set per project." -- these two fields
+    # are that per-project setting; the material reconciliation report
+    # (store app, step 9) reads them rather than hard-coding 5/10.
+    variance_amber_threshold_percent = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("5"))
+    variance_red_threshold_percent = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("10"))
 
     class Meta:
         ordering = ["code"]

@@ -32,6 +32,7 @@ from .models import (
     GRN,
     Issue,
     ItemCategory,
+    MaterialAllowance,
     ReturnToStore,
     StockCount,
     Store,
@@ -541,3 +542,178 @@ class TransferStockCountReversalViewsTestCase(TestCase):
         self.assertEqual(stock_count.approved_by, self.pm)
         quantity, _, _ = StockMovement.current_balance(self.store_a, self.item)
         self.assertEqual(quantity, Decimal("190.000"))
+
+
+class MaterialAllowanceViewsTestCase(TestCase):
+    """
+    Step 9's Django-test-client coverage: the "Set material
+    allowances per BOQ item" permission row (Admin/QS "Yes",
+    everyone else at most "View"), the over-allowance approval route,
+    and the reconciliation report page rendering the acceptance
+    test's own figures.
+    """
+
+    def setUp(self):
+        company = Company.objects.create(name="Test Contractor Ltd")
+        self.project = Project.objects.create(company=company, code="STOREV-4", name="Store views test 4")
+
+        self.storekeeper = User.objects.create_user(username="keeper4", password="pw")
+        self.qs_user = User.objects.create_user(username="qs4", password="pw")
+        self.pm_user = User.objects.create_user(username="pm4", password="pw")
+        self.viewer_user = User.objects.create_user(username="viewer4", password="pw")
+
+        ProjectMembership.objects.create(user=self.storekeeper, project=self.project, role=ROLE_STOREKEEPER)
+        ProjectMembership.objects.create(user=self.qs_user, project=self.project, role=ROLE_QS)
+        ProjectMembership.objects.create(user=self.pm_user, project=self.project, role=ROLE_PROJECT_MANAGER)
+        ProjectMembership.objects.create(user=self.viewer_user, project=self.project, role=ROLE_VIEWER)
+
+        self.store = Store.objects.create(
+            project=self.project, code="MAIN", name="Main yard", storekeeper=self.storekeeper
+        )
+        category = ItemCategory.objects.create(name="Cement and Binders")
+        self.item = StoreItem.objects.create(
+            code="CEM-01", name="Cement, 50kg bag", category=category, unit=UnitOfMeasure.objects.get(code="t")
+        )
+
+        boq = BOQ.objects.create(project=self.project, version_number=1, status=BOQ.STATUS_APPROVED)
+        bill = Bill.objects.create(boq=boq, number=1, title="Concrete works")
+        self.boq_item = BOQItem.objects.create(
+            bill=bill,
+            item_reference="4.02",
+            description="Class 20 concrete in culverts",
+            item_type=BOQItem.TYPE_MEASURED,
+            unit=UnitOfMeasure.objects.get(code="m³"),
+            quantity=Decimal("100"),
+            rate=Decimal("50.00"),
+        )
+        StockMovement.objects.create(
+            store=self.store,
+            item=self.item,
+            quantity=Decimal("200"),
+            unit_cost=Decimal("150.00"),
+            document_type=StockMovement.DOCUMENT_GRN,
+            document_id=1,
+            created_by=self.storekeeper,
+        )
+
+    def test_qs_can_set_a_material_allowance(self):
+        self.client.force_login(self.qs_user)
+        response = self.client.post(
+            reverse("store:material_allowance_create", args=[self.project.pk]),
+            {
+                "boq_item": self.boq_item.pk,
+                "store_item": self.item.pk,
+                "quantity_per_unit": "0.32",
+                "wastage_percent": "5",
+            },
+        )
+        allowance = MaterialAllowance.objects.get(boq_item=self.boq_item, store_item=self.item)
+        self.assertRedirects(response, reverse("store:material_allowance_list", args=[self.project.pk]))
+        self.assertEqual(allowance.allowed_quantity, Decimal("33.600"))
+
+    def test_storekeeper_cannot_set_a_material_allowance(self):
+        self.client.force_login(self.storekeeper)
+        response = self.client.post(
+            reverse("store:material_allowance_create", args=[self.project.pk]),
+            {
+                "boq_item": self.boq_item.pk,
+                "store_item": self.item.pk,
+                "quantity_per_unit": "0.32",
+                "wastage_percent": "5",
+            },
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_project_manager_can_view_but_not_set_a_material_allowance(self):
+        # Section 2's table: Project Manager gets "View" on this row,
+        # not "Yes" -- the list page renders for them, but posting to
+        # the create view is still blocked.
+        self.client.force_login(self.pm_user)
+        list_response = self.client.get(reverse("store:material_allowance_list", args=[self.project.pk]))
+        self.assertEqual(list_response.status_code, 200)
+        create_response = self.client.post(
+            reverse("store:material_allowance_create", args=[self.project.pk]),
+            {
+                "boq_item": self.boq_item.pk,
+                "store_item": self.item.pk,
+                "quantity_per_unit": "0.32",
+                "wastage_percent": "5",
+            },
+        )
+        self.assertEqual(create_response.status_code, 403)
+
+    def _create_and_post_over_allowance_issue(self):
+        MaterialAllowance.objects.create(
+            boq_item=self.boq_item,
+            store_item=self.item,
+            quantity_per_unit=Decimal("0.32"),
+            wastage_percent=Decimal("5"),
+        )
+        self.client.force_login(self.storekeeper)
+        self.client.post(
+            reverse("store:issue_create", args=[self.project.pk, self.store.pk]),
+            {"date": "2026-04-01", "issued_to": "Culvert crew"},
+        )
+        issue = Issue.objects.get(store=self.store)
+        self.client.post(
+            reverse("store:issue_detail", args=[self.project.pk, self.store.pk, issue.pk]),
+            {"item": self.item.pk, "quantity": "36", "boq_item": self.boq_item.pk},
+        )
+        return issue
+
+    def test_posting_an_over_allowance_issue_without_a_reason_shows_an_error_and_stays_draft(self):
+        issue = self._create_and_post_over_allowance_issue()
+        response = self.client.post(
+            reverse("store:issue_post", args=[self.project.pk, self.store.pk, issue.pk]), follow=True
+        )
+        self.assertContains(response, "allowed")
+        issue.refresh_from_db()
+        self.assertEqual(issue.status, Issue.STATUS_DRAFT)
+
+    def test_posting_an_over_allowance_issue_with_a_reason_routes_it_to_pending_approval(self):
+        issue = self._create_and_post_over_allowance_issue()
+        response = self.client.post(
+            reverse("store:issue_post", args=[self.project.pk, self.store.pk, issue.pk]),
+            {"over_allowance_reason": "Extra cement for a wider culvert wall"},
+            follow=True,
+        )
+        self.assertContains(response, "routed")
+        issue.refresh_from_db()
+        self.assertEqual(issue.status, Issue.STATUS_PENDING_APPROVAL)
+        quantity, _, _ = StockMovement.current_balance(self.store, self.item)
+        self.assertEqual(quantity, Decimal("200.000"))  # no stock has moved yet
+
+    def test_submitter_cannot_approve_their_own_over_allowance_issue_over_http(self):
+        issue = self._create_and_post_over_allowance_issue()
+        self.client.post(
+            reverse("store:issue_post", args=[self.project.pk, self.store.pk, issue.pk]),
+            {"over_allowance_reason": "Extra cement for a wider culvert wall"},
+        )
+        # The storekeeper who submitted it is not a Project Manager,
+        # so the permission check alone already blocks them here.
+        denied_response = self.client.post(
+            reverse("store:issue_approve_over_allowance", args=[self.project.pk, self.store.pk, issue.pk])
+        )
+        self.assertEqual(denied_response.status_code, 403)
+
+    def test_project_manager_approves_and_the_reconciliation_report_shows_the_acceptance_test(self):
+        issue = self._create_and_post_over_allowance_issue()
+        self.client.post(
+            reverse("store:issue_post", args=[self.project.pk, self.store.pk, issue.pk]),
+            {"over_allowance_reason": "Extra cement for a wider culvert wall"},
+        )
+        self.client.force_login(self.pm_user)
+        approve_response = self.client.post(
+            reverse("store:issue_approve_over_allowance", args=[self.project.pk, self.store.pk, issue.pk]),
+            follow=True,
+        )
+        self.assertContains(approve_response, "approved")
+        issue.refresh_from_db()
+        self.assertEqual(issue.status, Issue.STATUS_POSTED)
+        quantity, _, _ = StockMovement.current_balance(self.store, self.item)
+        self.assertEqual(quantity, Decimal("164.000"))
+
+        report_response = self.client.get(reverse("store:reconciliation_report", args=[self.project.pk]))
+        self.assertContains(report_response, "33.600")
+        self.assertContains(report_response, "2.400")
+        self.assertContains(report_response, "Amber")

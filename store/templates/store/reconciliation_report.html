@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+
+{% block title %}Material reconciliation — {{ project.code }}{% endblock %}
+
+{% block content %}
+<p><a href="{% url 'core:project_detail' project.pk %}">&larr; {{ project.code }}</a></p>
+<h1>Material reconciliation — {{ project.code }}</h1>
+<p>For each BOQ item / store item pair with an allowance set (Section 6): material issued to that BOQ item,
+    net of returns, against the quantity allowed for the BOQ item's quantity, including wastage. Until
+    measurement (quantity executed) is built, "allowed" uses the BOQ quantity. Variance above the project's
+    amber threshold ({{ project.variance_amber_threshold_percent }}%) is shown amber; above the red threshold
+    ({{ project.variance_red_threshold_percent }}%) is shown red.</p>
+
+<table border="1" cellpadding="4">
+    <thead>
+        <tr>
+            <th>BOQ item</th>
+            <th>Store item</th>
+            <th>Issued</th>
+            <th>Returned</th>
+            <th>Net issued</th>
+            <th>Allowed</th>
+            <th>Variance (qty)</th>
+            <th>Variance (value)</th>
+            <th>Flag</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for row in rows %}
+        <tr>
+            <td>{{ row.allowance.boq_item.item_reference }} — {{ row.allowance.boq_item.description }}</td>
+            <td>{{ row.allowance.store_item.code }} — {{ row.allowance.store_item.name }}</td>
+            <td>{{ row.issued }} {{ row.allowance.store_item.unit.code }}</td>
+            <td>{{ row.returned }} {{ row.allowance.store_item.unit.code }}</td>
+            <td>{{ row.net_issued }} {{ row.allowance.store_item.unit.code }}</td>
+            <td>{{ row.allowed }} {{ row.allowance.store_item.unit.code }}</td>
+            <td>{{ row.variance }} {{ row.allowance.store_item.unit.code }} ({{ row.variance_percent }}%)</td>
+            <td>{{ row.value_variance }} {{ project.currency }}</td>
+            <td>
+                {% if row.flag == "red" %}
+                <span style="background-color:#f8d7da;color:#842029;padding:2px 8px;border-radius:4px;">Red</span>
+                {% elif row.flag == "amber" %}
+                <span style="background-color:#fff3cd;color:#664d03;padding:2px 8px;border-radius:4px;">Amber</span>
+                {% else %}
+                <span style="background-color:#d1e7dd;color:#0f5132;padding:2px 8px;border-radius:4px;">Green</span>
+                {% endif %}
+            </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="9">No material allowances set yet — nothing to reconcile.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

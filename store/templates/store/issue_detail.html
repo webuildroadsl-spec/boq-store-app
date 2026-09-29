@@ -10,6 +10,13 @@
     <dt>Date</dt><dd>{{ issue.date }}</dd>
     <dt>Requisition</dt><dd>{{ issue.requisition|default:"—" }}</dd>
     <dt>Issued to</dt><dd>{{ issue.issued_to }}</dd>
+    {% if issue.status == "pending_approval" %}
+    <dt>Submitted by</dt><dd>{{ issue.created_by|default:"—" }}</dd>
+    <dt>Reason for over-allowance</dt><dd>{{ issue.over_allowance_reason }}</dd>
+    {% endif %}
+    {% if issue.status == "posted" and issue.approved_by %}
+    <dt>Over-allowance approved by</dt><dd>{{ issue.approved_by }}</dd>
+    {% endif %}
 </dl>
 
 <h2>Lines</h2>
@@ -51,14 +58,31 @@
 <h2>Post this issue</h2>
 <p>Posting removes stock from {{ store.code }} at the store's current average cost, and locks this issue —
     per Section 2's rule, a Posted document cannot be edited or deleted afterward. Posting is blocked if any
-    line's quantity would take an item's balance below zero, or if any line has no BOQ item.</p>
+    line's quantity would take an item's balance below zero, or if any line has no BOQ item. If any line
+    would push a BOQ item's material use above its set allowance, posting instead routes this issue to a
+    Project Manager for approval — give a reason below so the Project Manager knows why the extra material
+    is needed. No stock moves until it's approved.</p>
 <form method="post" action="{% url 'store:issue_post' project.pk store.pk issue.pk %}">
     {% csrf_token %}
+    <label for="over_allowance_reason">Reason (only needed if this issue exceeds a material allowance)</label><br>
+    <input type="text" id="over_allowance_reason" name="over_allowance_reason" size="60"><br>
     <button type="submit" {% if not lines %}disabled{% endif %}>Post issue</button>
 </form>
 {% endif %}
 
-{% if can_manage and not issue.is_editable %}
+{% if issue.status == "pending_approval" %}
+<h2>Awaiting Project Manager approval</h2>
+<p>This issue would exceed a material allowance and has been held with no stock movement pending approval.</p>
+{% if can_approve_over_allowance %}
+<form method="post" action="{% url 'store:issue_approve_over_allowance' project.pk store.pk issue.pk %}">
+    {% csrf_token %}
+    <button type="submit">Approve over-allowance issue</button>
+</form>
+<p>The person who submitted this issue cannot approve it themselves.</p>
+{% endif %}
+{% endif %}
+
+{% if can_manage and issue.status == "posted" %}
     {% if issue.is_reversed %}
     <p>This issue has already been reversed.</p>
     {% else %}

@@ -9,6 +9,7 @@ from .models import (
     GRNLine,
     Issue,
     IssueLine,
+    MaterialAllowance,
     RequisitionLine,
     ReturnLine,
     ReturnToStore,
@@ -217,3 +218,19 @@ class ReversalForm(forms.Form):
     are corrected with a reversing document")."""
 
     reason = forms.CharField(max_length=255, widget=forms.TextInput(attrs={"size": 60}))
+
+
+class MaterialAllowanceForm(forms.ModelForm):
+    class Meta:
+        model = MaterialAllowance
+        fields = ["boq_item", "store_item", "quantity_per_unit", "wastage_percent"]
+        widgets = {
+            "quantity_per_unit": forms.NumberInput(attrs={"step": "0.0001"}),
+            "wastage_percent": forms.NumberInput(attrs={"step": "0.01"}),
+        }
+
+    def __init__(self, *args, project=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["store_item"].queryset = self.fields["store_item"].queryset.filter(active=True)
+        if project is not None:
+            self.fields["boq_item"].queryset = _boq_items_for_project(project)

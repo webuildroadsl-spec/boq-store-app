@@ -12,7 +12,7 @@ store rather than every store on the project.
 """
 
 from core.permissions import get_role, user_can_access_project
-from core.models import ROLE_PROJECT_MANAGER, ROLE_SITE_ENGINEER, ROLE_STOREKEEPER
+from core.models import ROLE_PROJECT_MANAGER, ROLE_QS, ROLE_SITE_ENGINEER, ROLE_STOREKEEPER
 
 
 def can_view_store_module(user, project):
@@ -121,6 +121,30 @@ def can_approve_stock_count(user, project):
     action -- Section 2's rule "No user can approve their own
     adjustment" is enforced separately, in StockCount.approve()
     itself, since it depends on *who counted*, not just the role."""
+    if user.is_superuser:
+        return True
+    return get_role(user, project) == ROLE_PROJECT_MANAGER
+
+
+# Section 2's "Set material allowances per BOQ item" row: Admin and QS
+# "Yes", Project Manager/Site Engineer/Viewer "View" -- Storekeeper
+# gets no access at all, not even viewing (the one row besides "Manage
+# users" and "Create and edit projects" where Storekeeper is flatly
+# "No"). Viewing the reconciliation report itself isn't listed under
+# this row -- it's covered by "View reports and dashboards", i.e.
+# `can_view_store_module`, same as every other store report.
+def can_manage_material_allowances(user, project):
+    if user.is_superuser:
+        return True
+    return get_role(user, project) == ROLE_QS
+
+
+# Section 2's "Approve issue above allowance" row: Admin and Project
+# Manager "Yes". Section 2's rule "No user can approve their own ...
+# over-allowance issue" is enforced separately, in
+# Issue.approve_over_allowance() itself, since it depends on who
+# submitted that specific issue, not just the role.
+def can_approve_over_allowance_issue(user, project):
     if user.is_superuser:
         return True
     return get_role(user, project) == ROLE_PROJECT_MANAGER

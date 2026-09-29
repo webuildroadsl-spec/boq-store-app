@@ -15,6 +15,7 @@ from .forms import (
     GRNLineForm,
     IssueForm,
     IssueLineForm,
+    MaterialAllowanceForm,
     RequisitionForm,
     RequisitionLineForm,
     ReturnForm,
@@ -28,6 +29,7 @@ from .forms import (
 from .models import (
     GRN,
     Issue,
+    MaterialAllowance,
     ReturnToStore,
     StockCount,
     StockMovement,
@@ -37,12 +39,14 @@ from .models import (
     Transfer,
 )
 from .permissions import (
+    can_approve_over_allowance_issue,
     can_approve_stock_count,
     can_create_requisition,
     can_create_transfer,
     can_dispatch_transfer,
     can_manage_grn,
     can_manage_issue,
+    can_manage_material_allowances,
     can_manage_return,
     can_manage_stock_count,
     can_receive_transfer,
@@ -419,6 +423,7 @@ def issue_detail(request, project_pk, store_pk, issue_pk):
             "line_form": line_form,
             "can_manage": can_manage,
             "reversal_form": ReversalForm(),
+            "can_approve_over_allowance": can_approve_over_allowance_issue(request.user, project),
         },
     )
 
@@ -446,13 +451,42 @@ def issue_post(request, project_pk, store_pk, issue_pk):
     issue = get_object_or_404(Issue, pk=issue_pk, store=store)
     if not can_manage_issue(request.user, store):
         raise PermissionDenied("Only this store's storekeeper can post this issue.")
+    reason = request.POST.get("over_allowance_reason", "").strip()
     try:
-        issue.post(request.user)
+        issue.post(request.user, over_allowance_reason=reason)
     except ValidationError as exc:
         for message in exc.messages:
             messages.error(request, message)
     else:
-        messages.success(request, f"Issue {issue.number} posted. Stock at {store.code} has been updated.")
+        issue.refresh_from_db()
+        if issue.status == Issue.STATUS_PENDING_APPROVAL:
+            messages.success(
+                request,
+                f"Issue {issue.number} would exceed its material allowance and has been routed to a "
+                f"Project Manager for approval. No stock has moved yet.",
+            )
+        else:
+            messages.success(request, f"Issue {issue.number} posted. Stock at {store.code} has been updated.")
+    return redirect("store:issue_detail", project_pk=project.pk, store_pk=store.pk, issue_pk=issue.pk)
+
+
+@login_required
+@require_POST
+def issue_approve_over_allowance(request, project_pk, store_pk, issue_pk):
+    project = _get_project_and_check_store_access(request, project_pk)
+    store = _get_store(request, project, store_pk)
+    issue = get_object_or_404(Issue, pk=issue_pk, store=store)
+    if not can_approve_over_allowance_issue(request.user, project):
+        raise PermissionDenied("Only a Project Manager can approve an over-allowance issue.")
+    try:
+        issue.approve_over_allowance(request.user)
+    except ValidationError as exc:
+        for message in exc.messages:
+            messages.error(request, message)
+    else:
+        messages.success(
+            request, f"Issue {issue.number} approved and posted. Stock at {store.code} has been updated."
+        )
     return redirect("store:issue_detail", project_pk=project.pk, store_pk=store.pk, issue_pk=issue.pk)
 
 
@@ -855,3 +889,71 @@ def stock_count_approve(request, project_pk, store_pk, stock_count_pk):
     return redirect(
         "store:stock_count_detail", project_pk=project.pk, store_pk=store.pk, stock_count_pk=stock_count.pk
     )
+
+
+# ---------------------------------------------------------------------------
+# Material allowances and reconciliation (Section 6).
+# ---------------------------------------------------------------------------
+
+
+@login_required
+def material_allowance_list(request, project_pk):
+    project = _get_project_and_check_store_access(request, project_pk)
+    allowances = MaterialAllowance.objects.filter(boq_item__bill__boq__project=project).select_related(
+        "boq_item", "store_item"
+    )
+    return render(
+        request,
+        "store/material_allowance_list.html",
+        {
+            "project": project,
+            "allowances": allowances,
+            "can_manage": can_manage_material_allowances(request.user, project),
+        },
+    )
+
+
+@login_required
+def material_allowance_create(request, project_pk):
+    project = _get_project_and_check_store_access(request, project_pk)
+    if not can_manage_material_allowances(request.user, project):
+        raise PermissionDenied("Only a QS can set material allowances.")
+
+    if request.method == "POST":
+        form = MaterialAllowanceForm(request.POST, project=project)
+        if form.is_valid():
+            form.save()
+            return redirect("store:material_allowance_list", project_pk=project.pk)
+    else:
+        form = MaterialAllowanceForm(project=project)
+
+    return render(request, "store/material_allowance_create.html", {"project": project, "form": form})
+
+
+@login_required
+@require_POST
+def material_allowance_delete(request, project_pk, allowance_pk):
+    project = _get_project_and_check_store_access(request, project_pk)
+    if not can_manage_material_allowances(request.user, project):
+        raise PermissionDenied("Only a QS can change material allowances.")
+    allowance = get_object_or_404(
+        MaterialAllowance.objects.filter(boq_item__bill__boq__project=project), pk=allowance_pk
+    )
+    allowance.delete()
+    return redirect("store:material_allowance_list", project_pk=project.pk)
+
+
+@login_required
+def reconciliation_report(request, project_pk):
+    """
+    Section 6's "used vs allowed" report and step 9's acceptance
+    test: "Allowance 0.32 t/m³, 5% wastage, 100 m³ = 33.6 t allowed;
+    issuing 36 t shows +2.4 t, amber." Every `MaterialAllowance` set
+    for this project's BOQ items, each with its own reconciliation.
+    """
+    project = _get_project_and_check_store_access(request, project_pk)
+    allowances = MaterialAllowance.objects.filter(boq_item__bill__boq__project=project).select_related(
+        "boq_item", "store_item"
+    )
+    rows = [allowance.reconciliation() for allowance in allowances]
+    return render(request, "store/reconciliation_report.html", {"project": project, "rows": rows})

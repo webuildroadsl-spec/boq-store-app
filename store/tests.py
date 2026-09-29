@@ -10,6 +10,11 @@ covering the literal acceptance test: "Issuing 250 bags when stock is
 Step 8 (transfer, stock count, reversal) tests follow after that,
 covering their own literal acceptance test: "Stock in transit counts
 in neither store; posted GRN cannot be edited."
+
+Step 9 (material allowances and reconciliation) tests follow after
+that, covering the build-order table's literal acceptance test:
+"Allowance 0.32 t/m³, 5% wastage, 100 m³ = 33.6 t allowed; issuing
+36 t shows +2.4 t, amber."
 """
 
 from decimal import Decimal
@@ -28,6 +33,7 @@ from .models import (
     Issue,
     IssueLine,
     ItemCategory,
+    MaterialAllowance,
     RequisitionLine,
     ReturnLine,
     ReturnToStore,
@@ -582,3 +588,187 @@ class DocumentReversalTests(TestCase):
         issue.reverse(self.user, "Issued to the wrong site")
         quantity, _, _ = StockMovement.current_balance(self.store, self.item)
         self.assertEqual(quantity, Decimal("200.000"))
+
+
+class MaterialAllowanceModelTests(TestCase):
+    """
+    Step 9's literal acceptance test (Section 8 build-order table):
+    "Allowance 0.32 t/m³, 5% wastage, 100 m³ = 33.6 t allowed; issuing
+    36 t shows +2.4 t, amber." Plus the over-allowance approval
+    workflow (Section 6 rule 2, Section 2's self-approval rule).
+    """
+
+    def setUp(self):
+        company = Company.objects.create(name="Test Contractor Ltd")
+        self.project = Project.objects.create(company=company, code="STORE-9", name="Store test 9")
+        self.storekeeper = User.objects.create_user(username="storekeeper9", password="pw")
+        self.pm = User.objects.create_user(username="pm9", password="pw")
+        self.store = Store.objects.create(
+            project=self.project, code="MAIN", name="Main yard", storekeeper=self.storekeeper
+        )
+        category = ItemCategory.objects.create(name="Cement and Binders")
+        self.item = StoreItem.objects.create(
+            code="CEM-01", name="Cement, 50kg bag", category=category, unit=UnitOfMeasure.objects.get(code="t")
+        )
+        self.supplier = Supplier.objects.create(name="ACME Building Supplies")
+
+        boq = BOQ.objects.create(project=self.project, version_number=1, status=BOQ.STATUS_APPROVED)
+        bill = Bill.objects.create(boq=boq, number=1, title="Concrete works")
+        self.boq_item = BOQItem.objects.create(
+            bill=bill,
+            item_reference="4.02",
+            description="Class 20 concrete in culverts",
+            item_type=BOQItem.TYPE_MEASURED,
+            unit=UnitOfMeasure.objects.get(code="m³"),
+            quantity=Decimal("100"),
+            rate=Decimal("50.00"),
+        )
+        self.allowance = MaterialAllowance.objects.create(
+            boq_item=self.boq_item,
+            store_item=self.item,
+            quantity_per_unit=Decimal("0.32"),
+            wastage_percent=Decimal("5"),
+        )
+
+        # 200 t of cement on hand -- plenty of physical stock, so
+        # every test here is exercising the *allowance* check, not
+        # the step 7 "exceeds stock on hand" check.
+        StockMovement.objects.create(
+            store=self.store,
+            item=self.item,
+            quantity=Decimal("200"),
+            unit_cost=Decimal("150.00"),
+            document_type=StockMovement.DOCUMENT_GRN,
+            document_id=1,
+            created_by=self.storekeeper,
+        )
+
+    def _create_issue(self, quantity):
+        issue = Issue.objects.create(
+            number=1, date="2026-04-01", store=self.store, issued_to="Culvert crew"
+        )
+        IssueLine.objects.create(issue=issue, item=self.item, quantity=quantity, boq_item=self.boq_item)
+        return issue
+
+    def test_allowed_quantity_matches_the_acceptance_test(self):
+        # 100 m³ x 0.32 t/m³ x 1.05 = 33.600 t.
+        self.assertEqual(self.allowance.allowed_quantity, Decimal("33.600"))
+
+    def test_reconciliation_shows_the_acceptance_tests_variance_and_amber_flag(self):
+        issue = self._create_issue(Decimal("36"))
+        issue.post(self.storekeeper, over_allowance_reason="Extra cement for a wider culvert wall")
+        issue.approve_over_allowance(self.pm)
+
+        recon = self.allowance.reconciliation()
+        self.assertEqual(recon["net_issued"], Decimal("36"))
+        self.assertEqual(recon["allowed"], Decimal("33.600"))
+        self.assertEqual(recon["variance"], Decimal("2.400"))
+        # 2.4 / 33.6 = 7.14...% -- above the default 5% amber threshold,
+        # at or below the default 10% red threshold.
+        self.assertEqual(recon["variance_percent"], Decimal("7.14"))
+        self.assertEqual(recon["flag"], "amber")
+
+    def test_issue_within_allowance_posts_immediately_with_no_warning(self):
+        issue = self._create_issue(Decimal("30"))
+        issue.post(self.storekeeper)  # no reason needed -- 30 t is within the 33.6 t allowed
+        issue.refresh_from_db()
+        self.assertEqual(issue.status, Issue.STATUS_POSTED)
+        quantity, _, _ = StockMovement.current_balance(self.store, self.item)
+        self.assertEqual(quantity, Decimal("170.000"))
+
+    def test_over_allowance_issue_without_a_reason_is_blocked(self):
+        issue = self._create_issue(Decimal("36"))
+        with self.assertRaises(ValidationError) as ctx:
+            issue.post(self.storekeeper)
+        self.assertIn("Provide a reason", " ".join(ctx.exception.messages))
+        issue.refresh_from_db()
+        self.assertEqual(issue.status, Issue.STATUS_DRAFT)
+        quantity, _, _ = StockMovement.current_balance(self.store, self.item)
+        self.assertEqual(quantity, Decimal("200.000"))  # nothing moved
+
+    def test_over_allowance_issue_with_a_reason_is_held_pending_with_no_stock_movement(self):
+        issue = self._create_issue(Decimal("36"))
+        issue.post(self.storekeeper, over_allowance_reason="Extra cement for a wider culvert wall")
+        issue.refresh_from_db()
+        self.assertEqual(issue.status, Issue.STATUS_PENDING_APPROVAL)
+        self.assertEqual(issue.created_by, self.storekeeper)
+        self.assertEqual(issue.over_allowance_reason, "Extra cement for a wider culvert wall")
+        quantity, _, _ = StockMovement.current_balance(self.store, self.item)
+        self.assertEqual(quantity, Decimal("200.000"))  # still nothing moved
+
+    def test_approving_an_over_allowance_issue_posts_it(self):
+        issue = self._create_issue(Decimal("36"))
+        issue.post(self.storekeeper, over_allowance_reason="Extra cement for a wider culvert wall")
+        issue.approve_over_allowance(self.pm)
+        issue.refresh_from_db()
+        self.assertEqual(issue.status, Issue.STATUS_POSTED)
+        self.assertEqual(issue.approved_by, self.pm)
+        quantity, _, _ = StockMovement.current_balance(self.store, self.item)
+        self.assertEqual(quantity, Decimal("164.000"))
+
+    def test_submitter_cannot_approve_their_own_over_allowance_issue(self):
+        issue = self._create_issue(Decimal("36"))
+        issue.post(self.storekeeper, over_allowance_reason="Extra cement for a wider culvert wall")
+        with self.assertRaises(ValidationError):
+            issue.approve_over_allowance(self.storekeeper)
+        issue.refresh_from_db()
+        self.assertEqual(issue.status, Issue.STATUS_PENDING_APPROVAL)
+
+    def test_approval_re_checks_stock_and_is_blocked_if_stock_has_moved_on(self):
+        issue = self._create_issue(Decimal("36"))
+        issue.post(self.storekeeper, over_allowance_reason="Extra cement for a wider culvert wall")
+
+        # Almost all the physical stock leaves through a separate,
+        # ordinary (within-allowance) issue against a different BOQ
+        # item before the Project Manager gets to approve the first one.
+        boq = BOQ.objects.get(project=self.project)
+        bill = boq.bills.first()
+        other_boq_item = BOQItem.objects.create(
+            bill=bill,
+            item_reference="4.03",
+            description="Class 20 concrete in headwalls",
+            item_type=BOQItem.TYPE_MEASURED,
+            unit=UnitOfMeasure.objects.get(code="m³"),
+            quantity=Decimal("500"),
+            rate=Decimal("50.00"),
+        )
+        other_issue = Issue.objects.create(
+            number=2, date="2026-04-02", store=self.store, issued_to="Headwall crew"
+        )
+        IssueLine.objects.create(
+            issue=other_issue, item=self.item, quantity=Decimal("180"), boq_item=other_boq_item
+        )
+        other_issue.post(self.storekeeper)
+
+        with self.assertRaises(ValidationError) as ctx:
+            issue.approve_over_allowance(self.pm)
+        self.assertIn("exceed", " ".join(ctx.exception.messages))
+        issue.refresh_from_db()
+        self.assertEqual(issue.status, Issue.STATUS_PENDING_APPROVAL)
+
+    def test_a_pair_with_no_allowance_set_is_never_routed_regardless_of_quantity(self):
+        other_item = StoreItem.objects.create(
+            code="SND-01",
+            name="Sand",
+            category=ItemCategory.objects.get(name="Cement and Binders"),
+            unit=UnitOfMeasure.objects.get(code="t"),
+        )
+        StockMovement.objects.create(
+            store=self.store,
+            item=other_item,
+            quantity=Decimal("1000"),
+            unit_cost=Decimal("20.00"),
+            document_type=StockMovement.DOCUMENT_GRN,
+            document_id=2,
+            created_by=self.storekeeper,
+        )
+        issue = Issue.objects.create(
+            number=3, date="2026-04-03", store=self.store, issued_to="Culvert crew"
+        )
+        # Way more sand than the (nonexistent) allowance would ever
+        # permit -- there's no MaterialAllowance for this pair, so
+        # Section 6 has nothing to reconcile and this posts straight away.
+        IssueLine.objects.create(issue=issue, item=other_item, quantity=Decimal("900"), boq_item=self.boq_item)
+        issue.post(self.storekeeper)
+        issue.refresh_from_db()
+        self.assertEqual(issue.status, Issue.STATUS_POSTED)

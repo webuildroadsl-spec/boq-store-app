@@ -4,7 +4,7 @@ Django + PostgreSQL backend for the BOQ and Store modules described in
 [`docs/requirements.md`](docs/requirements.md). This repo is being built
 one step at a time from Section 8 of that spec.
 
-**Current status: Step 8 of 10** — Transfer, stock count, adjustment, reversing documents.
+**Current status: Step 9 of 10** — Material allowances and reconciliation report.
 
 ## Setup (local development)
 
@@ -563,15 +563,119 @@ plus successful reversal of a posted GRN, and stock count approval
 being refused to the counter (403) but succeeding for a Project
 Manager. 141 tests pass overall (125 existing + 16 new).
 
-**Not built** (deliberately, step 9-10 per Section 8): material
-allowances and the reconciliation report, so nothing yet compares
-material issued against what the BOQ allows or flags overuse; and
-none of step 10's reports, dashboard, offline support or backups.
-Document numbers still don't follow Section 5.3 rule 5's literal
-`GRN-MAIN-2026-0015` format anywhere in the app (plain incrementing
-integers, per store or per project) — a simplification carried since
-step 6 that should have been disclosed there and is being disclosed
-now instead.
+**Not built** (deliberately, step 10 per Section 8): reports,
+dashboard, offline store screens and backups. Document numbers still
+don't follow Section 5.3 rule 5's literal `GRN-MAIN-2026-0015` format
+anywhere in the app (plain incrementing integers, per store or per
+project) — a simplification carried since step 6 that should have
+been disclosed there and is being disclosed now instead.
+
+## Material allowances and reconciliation report (step 9)
+
+Section 6's link between the BOQ and the store: how much of a store
+item one unit of a BOQ item's work is allowed to consume, and a
+report comparing that to what has actually been issued.
+
+- **`MaterialAllowance` is one row per (BOQ item, store item) pair,
+  project-wide, not per store.** Section 6's example is "1 m³ of Class
+  20 concrete in culverts = 0.32 t cement, wastage 5%" — a single BOQ
+  item's work can consume several store items (concrete needs cement
+  *and* sand *and* aggregate, each its own row), and a BOQ item isn't
+  itself scoped to one store, so `reconciliation()` looks at
+  `StockMovement`s across every store in the project rather than one
+  store at a time. `allowed_quantity` is exactly Section 6's formula:
+  `BOQ quantity × quantity per unit × (1 + wastage %)`.
+- **Rule 1's "quantity executed" branch is not implemented** —
+  disclosed simplification. Section 6 rule 1 says the allowed quantity
+  should switch from the BOQ's quantity to the *quantity executed to
+  date* once measurement (Phase 3) exists; measurement doesn't exist
+  yet in this app, so `allowed_quantity` always uses the BOQ item's
+  own `quantity` field, per the rule's own fallback ("or BOQ
+  quantity").
+- **An over-allowance issue is held with zero stock movement, not
+  posted-then-flagged.** Section 6 rule 2 says the system "warns the
+  Storekeeper and routes the issue to a Project Manager for approval
+  with a reason" before it "becomes a loss" — read literally, that
+  means the material must not leave the store until someone with
+  authority has looked at it. `Issue.post()` now takes an optional
+  `over_allowance_reason`: if any line would push a (BOQ item, store
+  item) pair's net issued above its allowance, posting creates no
+  `StockMovement` at all and instead holds the issue at a new third
+  status, `STATUS_PENDING_APPROVAL`, recording who submitted it and
+  why. `Issue.approve_over_allowance()` is the only way out of that
+  state — it re-runs the stock/BOQ-item checks from scratch (stock may
+  have moved between submission and approval) and only then posts the
+  movements, exactly like the ordinary path.
+- **`Issue.created_by` means "whoever's `post()` attempt turned out to
+  be over allowance," not "who drafted this issue."** Issue had no
+  such field through steps 6-8; it's added now, set only at the moment
+  an over-allowance condition is detected, purely so
+  `approve_over_allowance()` can enforce Section 2's "No user can
+  approve their own ... over-allowance issue" the same direct way
+  Stock count's counter/approver check works (step 8) — checked
+  against who actually submitted it, not left to the role permission
+  to happen to keep them apart.
+- **The reconciliation report's value figure uses each pair's own
+  average issue cost, not one project-wide average.** Section 6 rule 3
+  wants "quantity × weighted average cost," but the same store item
+  can sit in several stores at different average costs, so there's no
+  single "the" average cost to multiply by. `reconciliation()` instead
+  divides the total cost actually recorded on that BOQ item's own
+  Issue movements by the quantity issued — a disclosed simplification,
+  not the literal store-wide weighted average.
+- **The amber/red thresholds are read from the project, not
+  hard-coded.** Section 6 rule 4 ("above 5% amber, above 10% red,
+  thresholds set per project") is implemented as two new fields,
+  `Project.variance_amber_threshold_percent` and
+  `variance_red_threshold_percent` (defaulting to 5 and 10), and the
+  flag is applied to the variance's *absolute* percentage of what was
+  allowed — the spec doesn't say whether under-use should flag
+  differently from over-use, so both are treated the same.
+- **Setting allowances follows Section 2's table literally**: Admin
+  and QS get "Yes" (`can_manage_material_allowances`), Project
+  Manager/Site Engineer/Viewer get "View" (they can open the list and
+  the report but not the create/delete views), and Storekeeper gets no
+  access at all — the one row besides "Manage users" and "Create and
+  edit projects" where Storekeeper is flatly "No." Approving an
+  over-allowance issue is Admin/Project Manager only
+  (`can_approve_over_allowance_issue`), matching "Approve issue above
+  allowance."
+
+**The step 9 acceptance test** — "Allowance 0.32 t/m³, 5% wastage,
+100 m³ = 33.6 t allowed; issuing 36 t shows +2.4 t, amber" — was run
+manually end-to-end over real HTTP. A QS set an allowance of 0.32 t/m³
+with 5% wastage against a BOQ item with quantity 100 m³; the
+allowances list and an initial reconciliation report confirmed 33.600
+t allowed before anything was issued. A storekeeper then tried to post
+a 36 t issue against that same BOQ item/store item pair: posting with
+no reason was correctly blocked, showing "issuing 36.000 t would bring
+net issued to 36.000 t, above the 33.600 t allowed" and "Provide a
+reason ..."; posting with a reason instead held the issue as Pending
+Project Manager approval with the store's balance unchanged (still
+200 t). Logging in as a Project Manager and approving posted the
+issue, dropped the balance to 164 t, and recorded `approved_by`. The
+reconciliation report then showed exactly the acceptance test's own
+numbers: 33.600 t allowed, 36.000 t net issued, a variance of 2.400 t
+(7.14%), flagged Amber. Smoke-test data cleaned up afterward.
+
+**Tested:** `store/tests.py` — the acceptance test itself at the model
+level (`allowed_quantity` == 33.600, `reconciliation()`'s variance and
+amber flag after posting 36 t), an issue within allowance posting
+immediately with no warning, an over-allowance issue with no reason
+being blocked and leaving stock untouched, one with a reason being
+held pending with zero stock movement, approval posting it and
+recording `approved_by`, the submitter being blocked from approving
+their own issue, approval re-checking stock from scratch and being
+blocked if stock moved on in the meantime, and a (BOQ item, store
+item) pair with no allowance set never being routed regardless of
+quantity. `store/test_views.py` — a QS creating an allowance over
+HTTP, a Storekeeper being refused (403), a Project Manager being able
+to view the list/report but refused on create (403), posting an
+over-allowance issue without/with a reason over the Django test
+client, the submitter being refused (403) on the approval endpoint,
+and a Project Manager's approval showing up correctly in the
+reconciliation report's rendered page. 157 tests pass overall (141
+existing + 16 new).
 
 ## How project access is scoped (step 2)
 

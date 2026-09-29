@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+
+{% block title %}Set material allowance — {{ project.code }}{% endblock %}
+
+{% block content %}
+<p><a href="{% url 'store:material_allowance_list' project.pk %}">&larr; Material allowances — {{ project.code }}</a></p>
+<h1>Set a material allowance — {{ project.code }}</h1>
+<p>e.g. an allowance of 0.32 t of cement per m³ of concrete, with 5% wastage, means 100 m³ of that BOQ
+    item's work is allowed to consume up to 33.6 t of cement before an issue needs Project Manager approval.</p>
+
+<form method="post">
+    {% csrf_token %}
+    {{ form.as_p }}
+    <button type="submit">Save allowance</button>
+</form>
+{% endblock %}

@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+
+{% block title %}Material allowances — {{ project.code }}{% endblock %}
+
+{% block content %}
+<p><a href="{% url 'core:project_detail' project.pk %}">&larr; {{ project.code }}</a></p>
+<h1>Material allowances — {{ project.code }}</h1>
+<p>How much of a store item one unit of a BOQ item's work is allowed to consume, including wastage. Set once
+    per BOQ item / store item pair; issues that would push net material issued above the allowance are routed
+    to a Project Manager for approval instead of posting straight away.</p>
+
+<table border="1" cellpadding="4">
+    <thead>
+        <tr><th>BOQ item</th><th>Store item</th><th>Quantity per unit</th><th>Wastage %</th><th></th></tr>
+    </thead>
+    <tbody>
+        {% for allowance in allowances %}
+        <tr>
+            <td>{{ allowance.boq_item.item_reference }} — {{ allowance.boq_item.description }}</td>
+            <td>{{ allowance.store_item.code }} — {{ allowance.store_item.name }}</td>
+            <td>{{ allowance.quantity_per_unit }} {{ allowance.store_item.unit.code }}</td>
+            <td>{{ allowance.wastage_percent }}%</td>
+            <td>
+                {% if can_manage %}
+                <form method="post" action="{% url 'store:material_allowance_delete' project.pk allowance.pk %}">
+                    {% csrf_token %}
+                    <button type="submit">Remove</button>
+                </form>
+                {% endif %}
+            </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="5">No material allowances set yet.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+{% if can_manage %}
+<p><a href="{% url 'store:material_allowance_create' project.pk %}">Set a new material allowance</a></p>
+{% endif %}
+<p><a href="{% url 'store:reconciliation_report' project.pk %}">View the reconciliation report</a></p>
+{% endblock %}
