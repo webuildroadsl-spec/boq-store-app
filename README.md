@@ -677,6 +677,178 @@ and a Project Manager's approval showing up correctly in the
 reconciliation report's rendered page. 157 tests pass overall (141
 existing + 16 new).
 
+## Reports, dashboard, offline store screens, backups (step 10)
+
+Section 8's final build-order row, and the biggest single step: all
+of Section 7.1's reporting and dashboard, and both halves of Section
+7.2's non-functional requirements (offline GRN/issue capture, and
+database backup/restore).
+
+### Reports and dashboard (Section 7.1)
+
+- **A new `reports` app assembles data (`reportdata.py`), renders
+  screens, and exports Excel/PDF (`exporter.py`) — no report writes to
+  the database.** Every one of Section 7.1's eight reports (BOQ
+  summary, BOQ version comparison, stock balance, stock ledger/bin
+  card, material reconciliation, issues by BOQ item/section, reorder
+  alert, GRN register) and the per-project dashboard is a plain read
+  over the models steps 1-9 already built; `reconciliation()` (step 9)
+  and `_compare_boq_versions` (step 5) are reused directly rather than
+  reimplemented.
+- **Every report is offered on-screen as HTML, plus `?format=xlsx` and
+  `?format=pdf` where Section 7.1's table asks for them** — a single
+  `_respond()` helper in `reports/views.py` dispatches on the query
+  string so the view functions themselves don't repeat that logic.
+  Three reports (issues by BOQ item/section, reorder alert, GRN
+  register) are Excel-only per Section 7.1's own table; the other five
+  offer both formats.
+- **Section 4 rule 7's "grand total = sum of bill totals + contingency
+  + tax, each shown separately" is new BOQ fields, not a redefinition
+  of the existing `grand_total`.** `BOQ` gains `contingency_percent`
+  and `tax_percent` (percentages, default 0, admin-editable only — no
+  dedicated BOQ-detail form was built for them, since nothing before
+  step 10 needed to set them); `BOQ.grand_total` keeps its original
+  meaning ("sum of bills") unchanged, so the ~157 tests and
+  `VariationOrder.value_impact` that already read it that way keep
+  working. `contingency_amount`, `tax_amount`, and `final_total` are
+  new properties instead. **Disclosed choice**: the spec doesn't say
+  whether tax applies to the subtotal alone or to subtotal +
+  contingency; `tax_amount` uses subtotal + contingency (the common
+  convention for VAT/GST-style taxes), documented in the property's
+  own docstring.
+- **The dashboard degrades per-user rather than an all-or-nothing
+  403.** A Storekeeper has no BOQ access at all (Section 2), so
+  `dashboard_data()` takes a `can_see_boq` flag and returns `None` for
+  the BOQ-only figures (grand total, top-5-over-allowance) instead of
+  refusing the whole page — a Storekeeper still gets a dashboard
+  scoped to their own store's stock value and reorder alerts.
+- **Every report and the dashboard are scoped by the same rules as the
+  rest of the app**: a Storekeeper only ever sees their own store's
+  rows (stock balance, ledger, GRN register, reorder alerts, and the
+  dashboard's stock figures); BOQ-related reports are refused (403) to
+  a Storekeeper entirely, per Section 2's "View reports and
+  dashboards" row; someone with no membership on the project at all
+  gets a 404, same as everywhere else in the app.
+
+### Offline GRN/issue capture (Section 7.2)
+
+- **A second, offline-capable form on the existing GRN/issue create
+  screens**, not a separate offline-only screen. Each posts to a new
+  dedicated JSON endpoint (`grn_offline_sync` / `issue_offline_sync`
+  in `store/views.py`) that combines create + add-one-line + post into
+  a single atomic request. **Disclosed simplification**: this means an
+  offline-queued document is always a single line, unlike the online
+  screens' multi-line, multi-step create flow — acceptable because a
+  storekeeper working offline on site is capturing one delivery or one
+  issue at a time, not building up a multi-line document without a
+  connection to save drafts against.
+- **The client-side logic (`pwa/static/pwa/offline-queue.js`) tries
+  the network first, and only queues in IndexedDB if that fails** —
+  covering a flaky connection as well as a fully offline one. Queued
+  submissions flush automatically on the browser's `online` event and
+  once on page load. A `manifest.json` + `service-worker.js` (the
+  `pwa` app) make the site installable and let the shell (not the
+  offline form data, which lives in IndexedDB, not the cache) load
+  while offline. **Disclosed simplification**: no Background Sync API
+  — flushing only happens while the tab is open and fires an `online`
+  event or loads fresh, not via the browser waking the page up in the
+  background; acceptable for a storekeeper's own device that they open
+  when back in signal.
+- **"The server rejects any synced document that would cause negative
+  stock and tells the user"** needed no new validation — the offline
+  sync endpoints reuse `Issue.post()`'s existing stock/allowance checks
+  unchanged. A rejected document is still saved as a Draft (not
+  discarded), with the rejection reason returned in the JSON response
+  for `offline-queue.js` to display, exactly like an over-allowance
+  issue held for approval (step 9).
+- **Verified genuinely offline, not just at the HTTP layer**: beyond
+  the 7 automated tests hitting the sync endpoints directly
+  (`store/test_views.py`'s `OfflineSyncViewsTestCase`), a real headless
+  Chromium session (Playwright) logged in, went offline
+  (`context.set_offline(True)`), filled in and submitted both the
+  offline Issue form and the offline GRN form, confirmed each showed
+  "saved offline — it will sync automatically once you're back
+  online," went back online, reloaded, and confirmed the
+  `#offline-sync-banner` reported "Synced an offline issue"/"Synced an
+  offline grn" — the literal acceptance test ("Offline GRN syncs
+  correctly"), reproduced end to end rather than assumed from the unit
+  tests alone.
+
+### Backups (Section 7.2)
+
+- **`backup_database` / `restore_database` management commands**, using
+  `pg_dump -Fc` and `pg_restore --clean --if-exists --no-owner` via
+  `subprocess`. `backup_database` also prunes dumps older than 30 days
+  (`--retention-days` to override). `restore_database` restores the
+  most recent dump in the backup directory by default, or a specific
+  file via `--file`, and refuses to run without `--yes` unless the
+  target database name contains "test" (so Django's own test runner —
+  and this app's own test for this command — can call it without an
+  interactive prompt in the way, the same reasoning Django's own
+  `flush` command uses).
+- **"Automatic daily" and "off the main server" are deployment
+  concerns, not something a Django command can arrange on its own —
+  disclosed, not built.** "Automatic daily" needs a scheduler pointed
+  at `backup_database` on whatever host runs the app (a cron entry or
+  systemd timer, e.g. `0 2 * * * cd /path/to/app && venv/bin/python
+  manage.py backup_database`). "Off the main server" means
+  `BACKUP_DIR` (overridable via the `DB_BACKUP_DIR` environment
+  variable; defaults to a `backups/` folder next to the project,
+  `.gitignore`d) should itself be a mount point for other storage — a
+  network share, a synced cloud folder, an attached volume — which is
+  a hosting decision, not something this command enforces.
+- **"Tested restore once a month" is the other half of the acceptance
+  test ("restore from last night's backup works"), automated rather
+  than manual**: `core/test_backup.py`'s `BackupRestoreTests` actually
+  runs `pg_dump`/`pg_restore` against a real database (`
+  TransactionTestCase`, not the ordinary `TestCase` — `pg_dump` and
+  `pg_restore` run in their own subprocess, over their own connection,
+  so they can only see data this test has actually committed, not data
+  sitting in `TestCase`'s wrapping, never-committed transaction),
+  creates data, backs up, deletes the data to simulate loss, restores,
+  and confirms the data is back.
+
+**Tested:** `reports/tests.py` — 10 tests on `reportdata.py` against
+hand-worked figures (subtotal/contingency/tax/grand-total math, added/
+changed/removed counts and value difference between two BOQ versions,
+a stock balance as-of a past date correctly excluding later
+movements, running balance on the stock ledger, reorder alert
+inclusion/exclusion at the minimum-stock boundary, GRN register
+showing only posted GRNs, and the dashboard's BOQ total/stock value/
+top-over-allowance/value-issued-this-month, both with and without BOQ
+visibility). `reports/test_views.py` — 11 tests on permission gating
+(a PM/Viewer/Storekeeper/outsider each getting the response Section 2
+says they should) and the `?format=` export dispatch actually
+returning `application/vnd.openxmlformats-officedocument.
+spreadsheetml.sheet` / `application/pdf`. `store/test_views.py`'s
+`OfflineSyncViewsTestCase` — 7 tests covering both sync endpoints:
+posts within stock/allowance, refused to a non-storekeeper, exceeding
+stock synced-but-not-posted with a reason returned, over-allowance
+with/without a reason held pending, and invalid data reporting errors
+without creating anything. `core/test_backup.py` — 5 tests: a dump
+file is created, a deleted row is restored from a backup taken before
+the deletion, `--file` targets a specific dump, retention pruning
+keeps only what's within the window, and restoring with no backups
+raises a clear error. Beyond the automated suite, the offline sync
+flow was also verified with a real headless-browser session as
+described above. 190 tests pass overall (163 existing + 27 new).
+
+### What step 10 does not cover
+
+Per Section 8's build-order table, step 10 is the last step. A few
+things noted along the way but out of scope for this build order,
+worth flagging for anyone picking this up next:
+
+- The contingency/tax rates are admin-editable only — no page in the
+  app itself lets a QS or PM set them on a BOQ version.
+- The offline forms' "single line per document" simplification (see
+  above) means a storekeeper who needs to record several different
+  items in one offline GRN or issue has to submit the offline form
+  once per item.
+- Backup scheduling and off-server storage are deployment
+  configuration, not something this codebase enforces — see the
+  backups section above.
+
 ## How project access is scoped (step 2)
 
 Every user who isn't a Django superuser only ever sees the projects

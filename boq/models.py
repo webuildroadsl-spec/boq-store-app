@@ -55,6 +55,14 @@ class BOQ(models.Model):
     )
     approved_date = models.DateField(null=True, blank=True)
     notes = models.TextField(blank=True)
+    # Rule 7: "Grand total = sum of bill totals + contingency + tax,
+    # each shown separately." These are the "structured tax fields"
+    # Company.tax_settings' own help text names this reporting step as
+    # needing -- kept per BOQ version (not per project) since a
+    # revision can renegotiate either rate without touching an earlier,
+    # Approved or Superseded version's own stated total.
+    contingency_percent = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("0"))
+    tax_percent = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("0"))
 
     class Meta:
         ordering = ["project", "version_number"]
@@ -74,10 +82,36 @@ class BOQ(models.Model):
 
     @property
     def grand_total(self):
-        """Sum of every bill's total. Contingency and tax (rule 7) are
-        added in the Section 7 reporting step, once those rates have a
-        place to live."""
+        """
+        Sum of every bill's total -- unchanged since step 3, and left
+        alone deliberately: `VariationOrder.value_impact` and every
+        existing test already read this as "sum of bills only," and
+        rule 7's contingency/tax belong on top of that sum, not folded
+        into it. See `contingency_amount` / `tax_amount` /
+        `final_total` below for the rule 7 figure the BOQ summary
+        report (step 10) actually shows.
+        """
         return sum((bill.total for bill in self.bills.all()), Decimal("0.00"))
+
+    @property
+    def contingency_amount(self):
+        return (self.grand_total * self.contingency_percent / Decimal("100")).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+
+    @property
+    def tax_amount(self):
+        """VAT/GST applied to the subtotal plus contingency -- the
+        common convention, and a disclosed choice since the spec
+        doesn't say which base the tax rate applies to."""
+        return ((self.grand_total + self.contingency_amount) * self.tax_percent / Decimal("100")).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+
+    @property
+    def final_total(self):
+        """Rule 7's actual "Grand total": sum of bills + contingency + tax."""
+        return self.grand_total + self.contingency_amount + self.tax_amount
 
     def create_revision(self, revision_type=TYPE_REVISION):
         """

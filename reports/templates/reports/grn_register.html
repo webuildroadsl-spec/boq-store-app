@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+
+{% block title %}GRN Register — {{ project.code }}{% endblock %}
+
+{% block content %}
+<p><a href="{% url 'reports:dashboard' project.pk %}">&larr; Dashboard</a></p>
+<h1>GRN Register — {{ project.code }}</h1>
+
+<form method="get">
+    <label>From: <input type="date" name="from" value="{{ date_from|date:'Y-m-d' }}"></label>
+    <label>To: <input type="date" name="to" value="{{ date_to|date:'Y-m-d' }}"></label>
+    <button type="submit">Filter</button>
+</form>
+<p><a href="?from={{ date_from|date:'Y-m-d' }}&to={{ date_to|date:'Y-m-d' }}&format=xlsx">Download Excel</a></p>
+
+<table border="1" cellpadding="4">
+    <thead><tr><th>Store</th><th>GRN</th><th>Date</th><th>Supplier</th><th>Total value</th></tr></thead>
+    <tbody>
+        {% for grn in rows %}
+        <tr>
+            <td>{{ grn.store.code }}</td>
+            <td><a href="{% url 'store:grn_detail' project.pk grn.store.pk grn.pk %}">{{ grn.number }}</a></td>
+            <td>{{ grn.date }}</td>
+            <td>{{ grn.supplier|default:"—" }}</td>
+            <td>{{ grn.total_value }}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="5">No posted GRNs in this range.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

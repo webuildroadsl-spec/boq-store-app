@@ -16,7 +16,10 @@ class BillInline(admin.TabularInline):
 
 @admin.register(BOQ)
 class BOQAdmin(admin.ModelAdmin):
-    list_display = ("project", "version_number", "type", "status")
+    # contingency_percent / tax_percent (step 10, rule 7) are set here
+    # for now rather than through a dedicated form on the BOQ detail
+    # page -- a disclosed simplification; see README.
+    list_display = ("project", "version_number", "type", "status", "contingency_percent", "tax_percent")
     list_filter = ("type", "status")
     inlines = [BillInline]
 

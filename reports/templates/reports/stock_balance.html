@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+
+{% block title %}Stock Balance — {{ project.code }}{% endblock %}
+
+{% block content %}
+<p><a href="{% url 'reports:dashboard' project.pk %}">&larr; Dashboard</a></p>
+<h1>Stock Balance — {{ project.code }}</h1>
+
+<form method="get">
+    <label>As at: <input type="date" name="date" value="{{ as_of_date|date:'Y-m-d' }}"></label>
+    <button type="submit">Show</button>
+</form>
+<p>
+    <a href="?date={{ as_of_date|date:'Y-m-d' }}&format=xlsx">Download Excel</a>
+    &nbsp;|&nbsp;
+    <a href="?date={{ as_of_date|date:'Y-m-d' }}&format=pdf">Download PDF</a>
+</p>
+
+<table border="1" cellpadding="4">
+    <thead><tr><th>Store</th><th>Item</th><th>Quantity</th><th>Average cost</th><th>Value</th></tr></thead>
+    <tbody>
+        {% for row in rows %}
+        <tr>
+            <td>{{ row.store.code }}</td>
+            <td>{{ row.item.code }} — {{ row.item.name }}</td>
+            <td>{{ row.quantity }}</td>
+            <td>{{ row.average_cost }}</td>
+            <td>{{ row.value }}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="5">No stock movements as at this date.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

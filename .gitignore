@@ -9,3 +9,8 @@ media/
 .DS_Store
 *.log
 boq/import_tmp/
+# Section 7.2's "Backups" (step 10): backup_database's own output
+# directory. Never committed -- these are database dumps, and in a
+# real deployment this path is a mount point for storage off the
+# main server, not part of the repo.
+backups/

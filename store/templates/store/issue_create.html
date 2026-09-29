@@ -11,4 +11,34 @@
     {{ form.as_p }}
     <button type="submit">Create as Draft</button>
 </form>
+
+<h2>Issue materials offline</h2>
+<p>Works without a connection: fill this in and submit, on site or not. It creates and posts a single-line
+    issue straight away — if you're offline, it's saved on this device and synced automatically once you're
+    back online. If it would exceed stock on hand, or a material allowance with no reason given, it's
+    still saved as a Draft and you'll be told why it wasn't posted.</p>
+<form class="offline-form" data-offline-label="Issue"
+      action="{% url 'store:issue_offline_sync' project.pk store.pk %}" method="post">
+    {% csrf_token %}
+    <p><label>Date <input type="date" name="date" required></label></p>
+    <p><label>Issued to <input type="text" name="issued_to" required></label></p>
+    <p><label>Item
+        <select name="item" required>
+            {% for item in offline_items %}
+            <option value="{{ item.pk }}">{{ item.code }} — {{ item.name }}</option>
+            {% endfor %}
+        </select>
+    </label></p>
+    <p><label>Quantity <input type="number" step="0.001" name="quantity" required></label></p>
+    <p><label>BOQ item
+        <select name="boq_item" required>
+            {% for boq_item in offline_boq_items %}
+            <option value="{{ boq_item.pk }}">{{ boq_item.item_reference }} — {{ boq_item.description }}</option>
+            {% endfor %}
+        </select>
+    </label></p>
+    <p><label>Reason (only needed if this exceeds a material allowance)
+        <input type="text" name="over_allowance_reason" size="60"></label></p>
+    <button type="submit">Save issue</button>
+</form>
 {% endblock %}

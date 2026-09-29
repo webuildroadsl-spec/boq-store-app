@@ -180,4 +180,15 @@ urlpatterns = [
         views.reconciliation_report,
         name="reconciliation_report",
     ),
+    # Offline sync (Section 7.2, step 10) -- see pwa/static/pwa/offline-queue.js.
+    path(
+        "projects/<int:project_pk>/stores/<int:store_pk>/offline/grn/",
+        views.grn_offline_sync,
+        name="grn_offline_sync",
+    ),
+    path(
+        "projects/<int:project_pk>/stores/<int:store_pk>/offline/issue/",
+        views.issue_offline_sync,
+        name="issue_offline_sync",
+    ),
 ]

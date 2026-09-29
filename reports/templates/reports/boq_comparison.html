@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+
+{% block title %}BOQ Version Comparison — {{ project.code }}{% endblock %}
+
+{% block content %}
+<p><a href="{% url 'reports:dashboard' project.pk %}">&larr; Dashboard</a></p>
+<h1>BOQ Version Comparison — {{ project.code }}</h1>
+<p>The same comparison as the BOQ module's own "Compare versions" screen, with Excel/PDF export added.</p>
+
+<form method="get">
+    <label>Version A:
+        <select name="a">
+            {% for boq in boqs %}
+            <option value="{{ boq.pk }}" {% if a_pk == boq.pk|stringformat:"s" %}selected{% endif %}>
+                v{{ boq.version_number }} ({{ boq.get_status_display }})
+            </option>
+            {% endfor %}
+        </select>
+    </label>
+    <label>Version B:
+        <select name="b">
+            {% for boq in boqs %}
+            <option value="{{ boq.pk }}" {% if b_pk == boq.pk|stringformat:"s" %}selected{% endif %}>
+                v{{ boq.version_number }} ({{ boq.get_status_display }})
+            </option>
+            {% endfor %}
+        </select>
+    </label>
+    <button type="submit">Compare</button>
+</form>
+
+{% if boq_a and boq_b %}
+<p>
+    <a href="?a={{ a_pk }}&b={{ b_pk }}&format=xlsx">Download Excel</a>
+    &nbsp;|&nbsp;
+    <a href="?a={{ a_pk }}&b={{ b_pk }}&format=pdf">Download PDF</a>
+</p>
+<h2>v{{ boq_a.version_number }} vs v{{ boq_b.version_number }}</h2>
+<p>{{ added }} added, {{ removed }} removed, {{ changed }} changed. Value difference:
+    <strong>{{ value_difference }}</strong></p>
+
+<table border="1" cellpadding="4">
+    <thead>
+        <tr><th>Item ref</th><th>Status</th><th>v{{ boq_a.version_number }} amount</th>
+            <th>v{{ boq_b.version_number }} amount</th><th>Difference</th></tr>
+    </thead>
+    <tbody>
+        {% for row in rows %}
+        {% if row.status != "unchanged" %}
+        <tr>
+            <td>{{ row.reference }}</td>
+            <td>{{ row.status }}</td>
+            <td>{{ row.item_a.amount|default:"—" }}</td>
+            <td>{{ row.item_b.amount|default:"—" }}</td>
+            <td>{{ row.value_difference }}</td>
+        </tr>
+        {% endif %}
+        {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+{% endblock %}

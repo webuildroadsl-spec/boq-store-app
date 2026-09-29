@@ -11,4 +11,33 @@
     {{ form.as_p }}
     <button type="submit">Create as Draft</button>
 </form>
+
+<h2>Record a GRN offline</h2>
+<p>Works without a connection: fill this in and submit, on site or not. It creates and posts a single-line
+    GRN straight away — if you're offline, it's saved on this device and synced automatically once you're
+    back online.</p>
+<form class="offline-form" data-offline-label="GRN"
+      action="{% url 'store:grn_offline_sync' project.pk store.pk %}" method="post">
+    {% csrf_token %}
+    <p><label>Date <input type="date" name="date" required></label></p>
+    <p><label>Supplier
+        <select name="supplier" required>
+            {% for supplier in offline_suppliers %}
+            <option value="{{ supplier.pk }}">{{ supplier.name }}</option>
+            {% endfor %}
+        </select>
+    </label></p>
+    <p><label>Delivery note number <input type="text" name="delivery_note_number"></label></p>
+    <p><label>Vehicle number <input type="text" name="vehicle_number"></label></p>
+    <p><label>Item
+        <select name="item" required>
+            {% for item in offline_items %}
+            <option value="{{ item.pk }}">{{ item.code }} — {{ item.name }}</option>
+            {% endfor %}
+        </select>
+    </label></p>
+    <p><label>Quantity <input type="number" step="0.001" name="quantity" required></label></p>
+    <p><label>Unit cost <input type="number" step="0.01" name="unit_cost" required></label></p>
+    <button type="submit">Save GRN</button>
+</form>
 {% endblock %}

@@ -188,6 +188,31 @@ class StockMovement(models.Model):
         )
         return quantity, value, average_unit_cost
 
+    @staticmethod
+    def balance_as_of(store, item, as_of_date):
+        """
+        The same (quantity, value, average_unit_cost) tuple as
+        `current_balance()`, but only counting movements posted on or
+        before `as_of_date` -- the "Stock balance ... as at any date"
+        report (Section 7.1, step 10). `created_at` is a timestamp, so
+        "on" a date means any time during that day in the current
+        timezone, not just midnight.
+        """
+        from django.utils import timezone
+
+        cutoff = timezone.make_aware(
+            timezone.datetime.combine(as_of_date, timezone.datetime.max.time())
+        )
+        result = StockMovement.objects.filter(store=store, item=item, created_at__lte=cutoff).aggregate(
+            qty=models.Sum("quantity"), value=models.Sum("total_cost")
+        )
+        quantity = result["qty"] or Decimal("0.000")
+        value = result["value"] or Decimal("0.00")
+        average_unit_cost = (
+            (value / quantity).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) if quantity else Decimal("0.00")
+        )
+        return quantity, value, average_unit_cost
+
 
 class GRN(models.Model):
     """

@@ -39,6 +39,8 @@ INSTALLED_APPS = [
     "core",
     "boq",
     "store",
+    "reports",
+    "pwa",
 ]
 
 MIDDLEWARE = [

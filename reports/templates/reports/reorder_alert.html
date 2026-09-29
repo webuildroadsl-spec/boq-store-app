@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+
+{% block title %}Reorder Alert — {{ project.code }}{% endblock %}
+
+{% block content %}
+<p><a href="{% url 'reports:dashboard' project.pk %}">&larr; Dashboard</a></p>
+<h1>Reorder Alert — {{ project.code }}</h1>
+<p><a href="?format=xlsx">Download Excel</a></p>
+
+<table border="1" cellpadding="4">
+    <thead><tr><th>Store</th><th>Item</th><th>On hand</th><th>Minimum</th><th>Reorder quantity</th></tr></thead>
+    <tbody>
+        {% for row in rows %}
+        <tr>
+            <td>{{ row.store.code }}</td>
+            <td>{{ row.item.code }} — {{ row.item.name }}</td>
+            <td>{{ row.quantity }}</td>
+            <td>{{ row.minimum_stock_level }}</td>
+            <td>{{ row.reorder_quantity }}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="5">Nothing is below its minimum stock level.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

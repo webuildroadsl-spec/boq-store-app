@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+
+{% block title %}Material Reconciliation — {{ project.code }}{% endblock %}
+
+{% block content %}
+<p><a href="{% url 'reports:dashboard' project.pk %}">&larr; Dashboard</a></p>
+<h1>Material Reconciliation — {{ project.code }}</h1>
+<p>
+    <a href="?format=xlsx">Download Excel</a>
+    &nbsp;|&nbsp;
+    <a href="?format=pdf">Download PDF</a>
+    &nbsp;|&nbsp;
+    <a href="{% url 'store:reconciliation_report' project.pk %}">Open the interactive version (store module)</a>
+</p>
+
+<table border="1" cellpadding="4">
+    <thead>
+        <tr>
+            <th>BOQ item</th><th>Store item</th><th>Issued</th><th>Returned</th>
+            <th>Net issued</th><th>Allowed</th><th>Variance</th><th>Flag</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for row in rows %}
+        <tr>
+            <td>{{ row.allowance.boq_item.item_reference }}</td>
+            <td>{{ row.allowance.store_item.code }} — {{ row.allowance.store_item.name }}</td>
+            <td>{{ row.issued }}</td>
+            <td>{{ row.returned }}</td>
+            <td>{{ row.net_issued }}</td>
+            <td>{{ row.allowed }}</td>
+            <td>{{ row.variance }} ({{ row.variance_percent }}%)</td>
+            <td>{{ row.flag|capfirst }}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="8">No material allowances set yet.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

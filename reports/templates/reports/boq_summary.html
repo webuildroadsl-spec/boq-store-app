@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+
+{% block title %}BOQ Summary — {{ project.code }}{% endblock %}
+
+{% block content %}
+<p><a href="{% url 'reports:dashboard' project.pk %}">&larr; Dashboard</a></p>
+<h1>BOQ Summary — {{ project.code }} (v{{ boq.version_number }}, {{ boq.get_status_display }})</h1>
+<p>
+    <a href="?format=xlsx{% if request.GET.boq %}&boq={{ request.GET.boq }}{% endif %}">Download Excel</a>
+    &nbsp;|&nbsp;
+    <a href="?format=pdf{% if request.GET.boq %}&boq={{ request.GET.boq }}{% endif %}">Download PDF</a>
+</p>
+
+<table border="1" cellpadding="4">
+    <thead><tr><th>Bill</th><th>Total</th></tr></thead>
+    <tbody>
+        {% for bill in bills %}
+        <tr><td>Bill {{ bill.number }}: {{ bill.title }}</td><td>{{ bill.total }}</td></tr>
+        {% endfor %}
+        <tr><td>Subtotal</td><td>{{ subtotal }}</td></tr>
+        <tr><td>Contingency ({{ contingency_percent }}%)</td><td>{{ contingency_amount }}</td></tr>
+        <tr><td>Tax ({{ tax_percent }}%)</td><td>{{ tax_amount }}</td></tr>
+        <tr><td><strong>Grand total</strong></td><td><strong>{{ grand_total }}</strong></td></tr>
+    </tbody>
+</table>
+
+<p>Contingency and tax rates are currently set through the Django admin on the BOQ record (a disclosed
+    simplification — see the README).</p>
+{% endblock %}

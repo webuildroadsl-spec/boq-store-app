@@ -717,3 +717,172 @@ class MaterialAllowanceViewsTestCase(TestCase):
         self.assertContains(report_response, "33.600")
         self.assertContains(report_response, "2.400")
         self.assertContains(report_response, "Amber")
+
+
+class OfflineSyncViewsTestCase(TestCase):
+    """
+    Step 10's "Offline" acceptance test half: "Offline GRN syncs
+    correctly." These hit `grn_offline_sync`/`issue_offline_sync`
+    directly (the same JSON endpoints `pwa/static/pwa/offline-queue.js`
+    calls once a connection returns) rather than driving a real
+    browser through going offline and back online -- that half of the
+    acceptance test is verified manually (see the README's step 10
+    section) since this test suite has no browser automation set up.
+    """
+
+    def setUp(self):
+        company = Company.objects.create(name="Test Contractor Ltd")
+        self.project = Project.objects.create(company=company, code="STOREV-5", name="Store views test 5")
+        self.storekeeper = User.objects.create_user(username="offlinekeeper", password="pw")
+        self.outsider = User.objects.create_user(username="offlineoutsider", password="pw")
+        ProjectMembership.objects.create(user=self.storekeeper, project=self.project, role=ROLE_STOREKEEPER)
+
+        self.store = Store.objects.create(
+            project=self.project, code="MAIN", name="Main yard", storekeeper=self.storekeeper
+        )
+        category = ItemCategory.objects.create(name="Cement and Binders OFF")
+        self.item = StoreItem.objects.create(
+            code="CEM-OFF", name="Cement", category=category, unit=UnitOfMeasure.objects.get(code="t")
+        )
+        self.supplier = Supplier.objects.create(name="ACME Building Supplies")
+
+        boq = BOQ.objects.create(project=self.project, version_number=1, status=BOQ.STATUS_APPROVED)
+        bill = Bill.objects.create(boq=boq, number=1, title="Earthworks")
+        self.boq_item = BOQItem.objects.create(
+            bill=bill, item_reference="1.01", description="Supply and lay cement", item_type=BOQItem.TYPE_MEASURED,
+            unit=UnitOfMeasure.objects.get(code="t"), quantity=Decimal("1000"), rate=Decimal("10.00"),
+        )
+
+    def test_offline_grn_sync_creates_and_posts_in_one_request(self):
+        self.client.force_login(self.storekeeper)
+        response = self.client.post(
+            reverse("store:grn_offline_sync", args=[self.project.pk, self.store.pk]),
+            {
+                "date": "2026-04-01",
+                "supplier": self.supplier.pk,
+                "delivery_note_number": "DN-OFF-1",
+                "vehicle_number": "",
+                "item": self.item.pk,
+                "quantity": "200",
+                "unit_cost": "150.00",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["ok"])
+        self.assertTrue(data["posted"])
+        quantity, value, _ = StockMovement.current_balance(self.store, self.item)
+        self.assertEqual(quantity, Decimal("200.000"))
+        self.assertEqual(value, Decimal("30000.00"))
+
+    def test_offline_grn_sync_refused_to_a_non_storekeeper(self):
+        self.client.force_login(self.outsider)
+        ProjectMembership.objects.create(user=self.outsider, project=self.project, role=ROLE_PROJECT_MANAGER)
+        response = self.client.post(
+            reverse("store:grn_offline_sync", args=[self.project.pk, self.store.pk]),
+            {
+                "date": "2026-04-01", "supplier": self.supplier.pk, "item": self.item.pk,
+                "quantity": "10", "unit_cost": "150.00",
+            },
+        )
+        self.assertEqual(response.status_code, 403)
+        data = response.json()
+        self.assertFalse(data["ok"])
+        self.assertEqual(GRN.objects.count(), 0)
+
+    def test_offline_grn_sync_with_invalid_data_reports_errors_and_creates_nothing(self):
+        self.client.force_login(self.storekeeper)
+        response = self.client.post(
+            reverse("store:grn_offline_sync", args=[self.project.pk, self.store.pk]),
+            {"date": "2026-04-01", "supplier": "", "item": self.item.pk, "quantity": "10", "unit_cost": "150.00"},
+        )
+        data = response.json()
+        self.assertFalse(data["ok"])
+        self.assertTrue(data["errors"])
+        self.assertEqual(GRN.objects.count(), 0)
+
+    def test_offline_issue_sync_posts_when_within_stock_and_allowance(self):
+        StockMovement.objects.create(
+            store=self.store, item=self.item, quantity=Decimal("200"), unit_cost=Decimal("150.00"),
+            document_type=StockMovement.DOCUMENT_GRN, document_id=1, created_by=self.storekeeper,
+        )
+        self.client.force_login(self.storekeeper)
+        response = self.client.post(
+            reverse("store:issue_offline_sync", args=[self.project.pk, self.store.pk]),
+            {"date": "2026-04-02", "issued_to": "Site crew", "item": self.item.pk, "quantity": "50", "boq_item": self.boq_item.pk},
+        )
+        data = response.json()
+        self.assertTrue(data["ok"])
+        self.assertTrue(data["posted"])
+        quantity, _, _ = StockMovement.current_balance(self.store, self.item)
+        self.assertEqual(quantity, Decimal("150.000"))
+
+    def test_offline_issue_sync_exceeding_stock_is_synced_but_not_posted(self):
+        """Section 7.2: "the server rejects any synced document that
+        would cause negative stock and tells the user" -- the sync
+        request still succeeds (the Issue is created as a Draft, not
+        lost), it just isn't posted."""
+        StockMovement.objects.create(
+            store=self.store, item=self.item, quantity=Decimal("20"), unit_cost=Decimal("150.00"),
+            document_type=StockMovement.DOCUMENT_GRN, document_id=1, created_by=self.storekeeper,
+        )
+        self.client.force_login(self.storekeeper)
+        response = self.client.post(
+            reverse("store:issue_offline_sync", args=[self.project.pk, self.store.pk]),
+            {"date": "2026-04-02", "issued_to": "Site crew", "item": self.item.pk, "quantity": "50", "boq_item": self.boq_item.pk},
+        )
+        data = response.json()
+        self.assertTrue(data["ok"])
+        self.assertFalse(data["posted"])
+        self.assertIn("exceed", " ".join(data["errors"]))
+        issue = Issue.objects.get(store=self.store)
+        self.assertEqual(issue.status, Issue.STATUS_DRAFT)
+
+    def test_offline_issue_sync_over_allowance_without_reason_is_held_pending(self):
+        MaterialAllowance.objects.create(
+            boq_item=self.boq_item, store_item=self.item, quantity_per_unit=Decimal("0.32"), wastage_percent=Decimal("5")
+        )
+        StockMovement.objects.create(
+            store=self.store, item=self.item, quantity=Decimal("200"), unit_cost=Decimal("150.00"),
+            document_type=StockMovement.DOCUMENT_GRN, document_id=1, created_by=self.storekeeper,
+        )
+        self.boq_item.quantity = Decimal("100")
+        self.boq_item.save()
+
+        self.client.force_login(self.storekeeper)
+        response = self.client.post(
+            reverse("store:issue_offline_sync", args=[self.project.pk, self.store.pk]),
+            {"date": "2026-04-02", "issued_to": "Culvert crew", "item": self.item.pk, "quantity": "36", "boq_item": self.boq_item.pk},
+        )
+        data = response.json()
+        self.assertTrue(data["ok"])
+        self.assertFalse(data["posted"])
+        issue = Issue.objects.get(store=self.store)
+        self.assertEqual(issue.status, Issue.STATUS_DRAFT)  # no reason given -> not even held pending, per Issue.post()
+
+    def test_offline_issue_sync_over_allowance_with_reason_is_held_pending_approval(self):
+        MaterialAllowance.objects.create(
+            boq_item=self.boq_item, store_item=self.item, quantity_per_unit=Decimal("0.32"), wastage_percent=Decimal("5")
+        )
+        StockMovement.objects.create(
+            store=self.store, item=self.item, quantity=Decimal("200"), unit_cost=Decimal("150.00"),
+            document_type=StockMovement.DOCUMENT_GRN, document_id=1, created_by=self.storekeeper,
+        )
+        self.boq_item.quantity = Decimal("100")
+        self.boq_item.save()
+
+        self.client.force_login(self.storekeeper)
+        response = self.client.post(
+            reverse("store:issue_offline_sync", args=[self.project.pk, self.store.pk]),
+            {
+                "date": "2026-04-02", "issued_to": "Culvert crew", "item": self.item.pk, "quantity": "36",
+                "boq_item": self.boq_item.pk, "over_allowance_reason": "Extra for a wider wall",
+            },
+        )
+        data = response.json()
+        self.assertTrue(data["ok"])
+        self.assertTrue(data["pending_approval"])
+        issue = Issue.objects.get(store=self.store)
+        self.assertEqual(issue.status, Issue.STATUS_PENDING_APPROVAL)
+        quantity, _, _ = StockMovement.current_balance(self.store, self.item)
+        self.assertEqual(quantity, Decimal("200.000"))  # still nothing moved

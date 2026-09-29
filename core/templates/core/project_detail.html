@@ -17,6 +17,8 @@
     <a href="{% url 'store:material_allowance_list' project.pk %}">Material allowances</a>
     &nbsp;|&nbsp;
     <a href="{% url 'store:reconciliation_report' project.pk %}">Reconciliation report</a>
+    &nbsp;|&nbsp;
+    <a href="{% url 'reports:dashboard' project.pk %}">Dashboard &amp; reports</a>
 </p>
 <dl>
     <dt>Client</dt><dd>{{ project.client|default:"—" }}</dd>

@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard — {{ project.code }}{% endblock %}
+
+{% block content %}
+<p><a href="{% url 'core:project_detail' project.pk %}">&larr; {{ project.code }}</a></p>
+<h1>Dashboard — {{ project.code }}</h1>
+
+<dl>
+    {% if can_see_boq %}
+    <dt>BOQ grand total{% if current_boq %} (v{{ current_boq.version_number }}){% endif %}</dt>
+    <dd>{% if boq_grand_total is not None %}{{ boq_grand_total }} {{ project.currency }}{% else %}No BOQ yet{% endif %}</dd>
+    {% endif %}
+    {% if can_see_store %}
+    <dt>Value of stock on hand</dt><dd>{{ stock_value }} {{ project.currency }}</dd>
+    <dt>Value issued this month</dt><dd>{{ value_issued_this_month }} {{ project.currency }}</dd>
+    {% endif %}
+</dl>
+
+{% if can_see_store %}
+<h2>Top 5 materials over allowance</h2>
+{% if top_over_allowance %}
+<table border="1" cellpadding="4">
+    <thead><tr><th>BOQ item</th><th>Store item</th><th>Variance</th><th>Flag</th></tr></thead>
+    <tbody>
+        {% for row in top_over_allowance %}
+        <tr>
+            <td>{{ row.allowance.boq_item.item_reference }}</td>
+            <td>{{ row.allowance.store_item.code }}</td>
+            <td>{{ row.variance }} ({{ row.variance_percent }}%)</td>
+            <td>{{ row.flag|capfirst }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p>No material is currently over its allowance.</p>
+{% endif %}
+
+<h2>Reorder alerts</h2>
+{% if reorder_alerts %}
+<table border="1" cellpadding="4">
+    <thead><tr><th>Store</th><th>Item</th><th>On hand</th><th>Minimum</th></tr></thead>
+    <tbody>
+        {% for row in reorder_alerts %}
+        <tr>
+            <td>{{ row.store.code }}</td>
+            <td>{{ row.item.code }} — {{ row.item.name }}</td>
+            <td>{{ row.quantity }}</td>
+            <td>{{ row.minimum_stock_level }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p>Nothing is below its minimum stock level.</p>
+{% endif %}
+{% endif %}
+
+<h2>Reports</h2>
+<ul>
+    {% if can_see_boq %}
+    <li><a href="{% url 'reports:boq_summary' project.pk %}">BOQ summary</a></li>
+    <li><a href="{% url 'reports:boq_comparison' project.pk %}">BOQ version comparison</a></li>
+    {% endif %}
+    {% if can_see_store %}
+    <li><a href="{% url 'reports:stock_balance' project.pk %}">Stock balance</a></li>
+    <li><a href="{% url 'reports:stock_ledger' project.pk %}">Stock ledger (bin card)</a></li>
+    <li><a href="{% url 'reports:material_reconciliation' project.pk %}">Material reconciliation</a></li>
+    <li><a href="{% url 'reports:issues_by_boq_item' project.pk %}">Issues by BOQ item / section</a></li>
+    <li><a href="{% url 'reports:reorder_alert' project.pk %}">Reorder alert</a></li>
+    <li><a href="{% url 'reports:grn_register' project.pk %}">GRN register</a></li>
+    {% endif %}
+</ul>
+{% endblock %}

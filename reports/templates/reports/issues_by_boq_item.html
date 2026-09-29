@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+
+{% block title %}Issues by BOQ Item / Section — {{ project.code }}{% endblock %}
+
+{% block content %}
+<p><a href="{% url 'reports:dashboard' project.pk %}">&larr; Dashboard</a></p>
+<h1>Issues by BOQ Item / Section — {{ project.code }}</h1>
+<p><a href="?format=xlsx">Download Excel</a></p>
+
+<table border="1" cellpadding="4">
+    <thead><tr><th>BOQ item</th><th>Section</th><th>Quantity issued</th><th>Value issued</th></tr></thead>
+    <tbody>
+        {% for row in rows %}
+        <tr>
+            <td>{{ row.boq_item|default:"—" }}</td>
+            <td>{{ row.section.code|default:"—" }}</td>
+            <td>{{ row.quantity }}</td>
+            <td>{{ row.value }}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="4">No issues posted yet.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

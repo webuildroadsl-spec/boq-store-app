@@ -1,0 +1,21 @@
+{% extends "reports/pdf/_base.html" %}
+{% block title %}Stock Balance — {{ project.code }}{% endblock %}
+{% block content %}
+<h1>Stock Balance — {{ project.code }}, as at {{ as_of_date }}</h1>
+<table>
+    <thead><tr><th>Store</th><th>Item</th><th class="amount">Quantity</th><th class="amount">Average Cost</th><th class="amount">Value</th></tr></thead>
+    <tbody>
+        {% for row in rows %}
+        <tr>
+            <td>{{ row.store.code }}</td>
+            <td>{{ row.item.code }} — {{ row.item.name }}</td>
+            <td class="amount">{{ row.quantity }}</td>
+            <td class="amount">{{ row.average_cost }}</td>
+            <td class="amount">{{ row.value }}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="5">No stock movements as at this date.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

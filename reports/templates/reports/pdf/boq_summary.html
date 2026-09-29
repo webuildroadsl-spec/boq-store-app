@@ -1,0 +1,17 @@
+{% extends "reports/pdf/_base.html" %}
+{% block title %}BOQ Summary — {{ boq.project.code }}{% endblock %}
+{% block content %}
+<h1>BOQ Summary — {{ boq.project.code }} (v{{ boq.version_number }}, {{ boq.get_status_display }})</h1>
+<table>
+    <thead><tr><th>Bill</th><th class="amount">Total</th></tr></thead>
+    <tbody>
+        {% for bill in bills %}
+        <tr><td>Bill {{ bill.number }}: {{ bill.title }}</td><td class="amount">{{ bill.total }}</td></tr>
+        {% endfor %}
+        <tr><td>Subtotal</td><td class="amount">{{ subtotal }}</td></tr>
+        <tr><td>Contingency ({{ contingency_percent }}%)</td><td class="amount">{{ contingency_amount }}</td></tr>
+        <tr><td>Tax ({{ tax_percent }}%)</td><td class="amount">{{ tax_amount }}</td></tr>
+        <tr class="total"><td>Grand total</td><td class="amount">{{ grand_total }}</td></tr>
+    </tbody>
+</table>
+{% endblock %}

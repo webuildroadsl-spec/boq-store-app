@@ -1,0 +1,20 @@
+{% extends "reports/pdf/_base.html" %}
+{% block title %}BOQ Comparison — {{ boq_a.project.code }}{% endblock %}
+{% block content %}
+<h1>BOQ Version Comparison — {{ boq_a.project.code }}: v{{ boq_a.version_number }} vs v{{ boq_b.version_number }}</h1>
+<table>
+    <thead><tr><th>Item Ref</th><th>Status</th><th class="amount">v{{ boq_a.version_number }} Amount</th><th class="amount">v{{ boq_b.version_number }} Amount</th><th class="amount">Difference</th></tr></thead>
+    <tbody>
+        {% for row in rows %}
+        <tr>
+            <td>{{ row.reference }}</td>
+            <td>{{ row.status }}</td>
+            <td class="amount">{% if row.item_a %}{{ row.item_a.amount|default:"—" }}{% else %}—{% endif %}</td>
+            <td class="amount">{% if row.item_b %}{{ row.item_b.amount|default:"—" }}{% else %}—{% endif %}</td>
+            <td class="amount">{{ row.value_difference }}</td>
+        </tr>
+        {% endfor %}
+        <tr class="total"><td colspan="4">Value difference</td><td class="amount">{{ value_difference }}</td></tr>
+    </tbody>
+</table>
+{% endblock %}

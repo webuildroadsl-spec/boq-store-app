@@ -26,6 +26,8 @@ urlpatterns = [
     path("", include("core.urls")),
     path("", include("boq.urls")),
     path("", include("store.urls")),
+    path("", include("reports.urls")),
+    path("", include("pwa.urls")),
 ]
 
 if settings.DEBUG:

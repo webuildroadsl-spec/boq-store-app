@@ -1,10 +1,19 @@
+{% load static %}
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <title>{% block title %}BOQ &amp; Store{% endblock %}</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <!-- Section 7.2's "Offline": manifest + service worker + the
+         IndexedDB-backed offline queue (pwa app, step 10). Loaded on
+         every page so a storekeeper's GRN/issue screens still work
+         after this page was cached while online. -->
+    <link rel="manifest" href="{% url 'pwa:manifest' %}">
+    <script src="{% static 'pwa/offline-queue.js' %}"></script>
 </head>
 <body>
+    <p id="offline-sync-banner" hidden style="background:#d1e7dd;color:#0f5132;padding:8px;"></p>
     {% if messages %}
     <ul class="messages">
         {% for message in messages %}

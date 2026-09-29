@@ -1,11 +1,14 @@
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied, ValidationError
+from django.db import transaction
 from django.db.models import Max
-from django.http import Http404
+from django.http import Http404, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
+from django.urls import reverse
 from django.views.decorators.http import require_POST
 
+from boq.models import BOQItem
 from core.models import Project
 from core.permissions import user_can_access_project
 
@@ -36,6 +39,7 @@ from .models import (
     Store,
     StoreItem,
     StoreRequisition,
+    Supplier,
     Transfer,
 )
 from .permissions import (
@@ -149,7 +153,21 @@ def grn_create(request, project_pk, store_pk):
     else:
         form = GRNForm()
 
-    return render(request, "store/grn_create.html", {"project": project, "store": store, "form": form})
+    return render(
+        request,
+        "store/grn_create.html",
+        {
+            "project": project,
+            "store": store,
+            "form": form,
+            # For the offline-capable quick-GRN form below the ordinary
+            # one (Section 7.2, step 10) -- plain <select> options, not
+            # a second Django form, since that form posts as JSON to
+            # grn_offline_sync rather than through this view.
+            "offline_items": StoreItem.objects.filter(active=True),
+            "offline_suppliers": Supplier.objects.all(),
+        },
+    )
 
 
 def _next_grn_number(store):
@@ -388,7 +406,21 @@ def issue_create(request, project_pk, store_pk):
     else:
         form = IssueForm(project=project)
 
-    return render(request, "store/issue_create.html", {"project": project, "store": store, "form": form})
+    return render(
+        request,
+        "store/issue_create.html",
+        {
+            "project": project,
+            "store": store,
+            "form": form,
+            # For the offline-capable quick-issue form (see grn_create's
+            # own comment above).
+            "offline_items": StoreItem.objects.filter(active=True),
+            "offline_boq_items": BOQItem.objects.filter(bill__boq__project=project).exclude(
+                item_type=BOQItem.TYPE_HEADING
+            ),
+        },
+    )
 
 
 @login_required
@@ -957,3 +989,135 @@ def reconciliation_report(request, project_pk):
     )
     rows = [allowance.reconciliation() for allowance in allowances]
     return render(request, "store/reconciliation_report.html", {"project": project, "rows": rows})
+
+
+# ---------------------------------------------------------------------------
+# Offline sync (Section 7.2's "storekeepers can create GRNs and issues
+# offline; they sync when a connection returns"). JSON in, JSON out --
+# see pwa/static/pwa/offline-queue.js, which is what actually calls
+# these from a form queued while the browser had no connection.
+# ---------------------------------------------------------------------------
+
+
+def _form_errors(*forms):
+    errors = []
+    for form in forms:
+        for field, field_errors in form.errors.items():
+            errors.extend(f"{field}: {message}" for message in field_errors)
+    return errors
+
+
+@login_required
+@require_POST
+def grn_offline_sync(request, project_pk, store_pk):
+    """
+    Creates a GRN, adds exactly one line, and posts it -- the
+    single-line shape an offline-queued GRN always has (a disclosed
+    simplification: the online screen supports several lines per GRN,
+    added one at a time; the offline form does not). A GRN can't
+    itself cause negative stock (it only adds), so posting here only
+    fails if the request's own fields don't validate.
+    """
+    project = _get_project_and_check_store_access(request, project_pk)
+    store = _get_store(request, project, store_pk)
+    if not can_manage_grn(request.user, store):
+        return JsonResponse(
+            {"ok": False, "errors": ["Only this store's storekeeper can record a GRN."]}, status=403
+        )
+
+    grn_form = GRNForm(request.POST)
+    line_form = GRNLineForm(request.POST)
+    if not grn_form.is_valid() or not line_form.is_valid():
+        return JsonResponse({"ok": False, "errors": _form_errors(grn_form, line_form)})
+
+    with transaction.atomic():
+        grn = grn_form.save(commit=False)
+        grn.store = store
+        grn.received_by = request.user
+        grn.number = _next_grn_number(store)
+        grn.save()
+        line = line_form.save(commit=False)
+        line.grn = grn
+        line.save()
+
+    try:
+        grn.post(request.user)
+        posted, errors = True, []
+    except ValidationError as exc:
+        posted, errors = False, exc.messages
+
+    return JsonResponse(
+        {
+            "ok": True,
+            "posted": posted,
+            "errors": errors,
+            "message": (
+                f"GRN {grn.number} synced and posted."
+                if posted
+                else f"GRN {grn.number} synced but not posted: {' '.join(errors)}"
+            ),
+            "detail_url": reverse("store:grn_detail", args=[project.pk, store.pk, grn.pk]),
+        }
+    )
+
+
+@login_required
+@require_POST
+def issue_offline_sync(request, project_pk, store_pk):
+    """
+    Creates an Issue, adds exactly one line, and attempts to post it
+    -- same single-line simplification as `grn_offline_sync`. This is
+    where Section 7.2's "the server rejects any synced document that
+    would cause negative stock and tells the user" actually applies:
+    `Issue.post()` raises `ValidationError` (caught below, not
+    propagated as an HTTP error) if the line would exceed stock on
+    hand, has no BOQ item, or would exceed a material allowance with
+    no `over_allowance_reason` given. The Issue itself is still
+    created as a Draft in every case -- rejected only means "not
+    posted," so nothing is silently lost; the storekeeper (or a
+    Project Manager, for the allowance case) can fix and post it from
+    the ordinary online screen.
+    """
+    project = _get_project_and_check_store_access(request, project_pk)
+    store = _get_store(request, project, store_pk)
+    if not can_manage_issue(request.user, store):
+        return JsonResponse(
+            {"ok": False, "errors": ["Only this store's storekeeper can record an issue."]}, status=403
+        )
+
+    issue_form = IssueForm(request.POST, project=project)
+    line_form = IssueLineForm(request.POST, project=project)
+    if not issue_form.is_valid() or not line_form.is_valid():
+        return JsonResponse({"ok": False, "errors": _form_errors(issue_form, line_form)})
+
+    with transaction.atomic():
+        issue = issue_form.save(commit=False)
+        issue.store = store
+        issue.number = _next_number(store.issues)
+        issue.save()
+        line = line_form.save(commit=False)
+        line.issue = issue
+        line.save()
+
+    reason = request.POST.get("over_allowance_reason", "").strip()
+    try:
+        issue.post(request.user, over_allowance_reason=reason)
+        posted, errors = True, []
+    except ValidationError as exc:
+        posted, errors = False, exc.messages
+    issue.refresh_from_db()
+
+    return JsonResponse(
+        {
+            "ok": True,
+            "posted": posted,
+            "pending_approval": issue.status == Issue.STATUS_PENDING_APPROVAL,
+            "errors": errors,
+            "message": (
+                f"Issue {issue.number} synced and posted."
+                if posted
+                else f"Issue {issue.number} synced but not posted: {' '.join(errors)}"
+            ),
+            "detail_url": reverse("store:issue_detail", args=[project.pk, store.pk, issue.pk]),
+        }
+    )
