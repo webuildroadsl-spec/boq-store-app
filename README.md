@@ -8,6 +8,26 @@ one step at a time from Section 8 of that spec.
 hardening (Step A).** Next: manual testing with real project data, then
 deployment to a test server. See "Production hardening (Step A)" below.
 
+## Quick start on Windows (double-click)
+
+For trying the app on your own PC and opening it from a phone on the
+same Wi-Fi. Needs Python 3.10+ and PostgreSQL installed.
+
+1. `windows\1_setup.bat` — installs libraries, creates the database
+   (asks for your PostgreSQL `postgres` password once), writes `.env`,
+   creates tables, and asks you to choose an admin login. Safe to run
+   again.
+2. `windows\2_run_for_phone.bat` — starts the app and shows the address
+   to type into your phone's browser. Keep the window open.
+3. `windows\3_log_everyone_out.bat` — test shortcut that ends every
+   login session at once, the same as the 30-minute idle timeout.
+
+The logic lives in `scripts/setup_local.py` and `scripts/run_for_phone.py`
+(they also work on macOS/Linux: `python3 scripts/setup_local.py`).
+Over plain `http://` on Wi-Fi the phone can't use the service worker,
+so reloading a page while offline won't work locally; the offline form
+still works as long as the page stays open. On the HTTPS server it can.
+
 ## Setup (local development)
 
 1. Clone the repo and enter it.
