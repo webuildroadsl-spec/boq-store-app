@@ -83,8 +83,29 @@ async function removeQueued(id) {
 function formEntriesToBody(entries) {
     const body = new URLSearchParams();
     entries.forEach(([key, value]) => body.append(key, value));
+    // A form's CSRF token goes stale whenever the user logs in again
+    // (Django issues a new one at every login), and the 30-minute idle
+    // timeout means anyone offline for longer than that WILL log in
+    // again before their queued documents sync. So always send the
+    // browser's current token from the csrftoken cookie, not the one
+    // that was on the form when it was filled in.
+    const current = currentCsrfToken();
+    if (current) {
+        body.set("csrfmiddlewaretoken", current);
+    }
     return body;
 }
+
+function currentCsrfToken() {
+    const match = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/);
+    return match ? decodeURIComponent(match[1]) : null;
+}
+
+// Thrown when the server answered, but not with the app's JSON -- almost
+// always because the session timed out and Django redirected the request
+// to the login page. Kept separate from a network error so the user is
+// told to log in instead of being told they're offline.
+class NeedsLoginError extends Error {}
 
 function setStatus(form, message, isError) {
     let box = form.querySelector(".offline-status");
@@ -104,6 +125,10 @@ async function submitToServer(url, body) {
         headers: { "X-Requested-With": "XMLHttpRequest" },
         credentials: "same-origin",
     });
+    const type = response.headers.get("Content-Type") || "";
+    if (!type.includes("application/json")) {
+        throw new NeedsLoginError(`Unexpected response (${response.status})`);
+    }
     const data = await response.json();
     return { response, data };
 }
@@ -126,9 +151,14 @@ async function handleOfflineForm(event) {
         } else {
             setStatus(form, (data.errors || ["The server rejected this document."]).join(" "), true);
         }
-    } catch (networkError) {
+    } catch (error) {
+        // Either offline or logged out: keep the document either way, so
+        // nothing typed on site is ever lost.
         await queueSubmission(url, entries, label);
-        setStatus(form, `${label} saved offline — it will sync automatically once you're back online.`, false);
+        const message = error instanceof NeedsLoginError
+            ? `${label} saved on this phone. Your login has expired — log in again and it will sync.`
+            : `${label} saved offline — it will sync automatically once you're back online.`;
+        setStatus(form, message, error instanceof NeedsLoginError);
         form.reset();
     }
 }
@@ -154,7 +184,18 @@ async function flushQueue() {
                 banner.hidden = false;
             }
         } catch (e) {
-            break; // still offline (or the server is down) -- try again on the next 'online' event
+            if (e instanceof NeedsLoginError) {
+                // Logged out (idle timeout). Leave everything queued; it
+                // flushes on the first page load after logging back in.
+                const banner = document.getElementById("offline-sync-banner");
+                if (banner) {
+                    banner.textContent = `${queued.length} document(s) saved offline are waiting. Log in to sync them.`;
+                    banner.style.background = "#fff3cd";
+                    banner.style.color = "#664d03";
+                    banner.hidden = false;
+                }
+            }
+            break; // offline, server down, or logged out -- try again later
         }
     }
 }

@@ -4,7 +4,9 @@ Django + PostgreSQL backend for the BOQ and Store modules described in
 [`docs/requirements.md`](docs/requirements.md). This repo is being built
 one step at a time from Section 8 of that spec.
 
-**Current status: Step 9 of 10** — Material allowances and reconciliation report.
+**Current status: all 10 steps of Section 8 built, plus production
+hardening (Step A).** Next: manual testing with real project data, then
+deployment to a test server. See "Production hardening (Step A)" below.
 
 ## Setup (local development)
 
@@ -848,6 +850,65 @@ worth flagging for anyone picking this up next:
 - Backup scheduling and off-server storage are deployment
   configuration, not something this codebase enforces — see the
   backups section above.
+
+## Production hardening (Step A)
+
+Added after step 10, before the app goes on a real server. No new
+features.
+
+**30-minute idle logout** (Section 7.2 "Security"). `SESSION_COOKIE_AGE`
+is 30 minutes and `SESSION_SAVE_EVERY_REQUEST` restarts that clock on
+every page, so only someone who leaves the app untouched for 30 minutes
+is logged out. Tests: `accounts/test_session_timeout.py`.
+
+**Offline queue survives the timeout.** Django issues a new CSRF token
+at every login, so a GRN queued offline for more than 30 minutes used
+to carry a stale token and get stuck in the queue forever (blocking
+everything queued after it). `offline-queue.js` now:
+
+- sends the browser's current token from the `csrftoken` cookie rather
+  than the one saved with the form;
+- treats any non-JSON answer (the redirect to the login page) as
+  "logged out", keeps the document queued, and shows a yellow banner:
+  "N document(s) saved offline are waiting. Log in to sync them."
+
+The server side of this is tested in
+`store/test_offline_relogin.py`. The JavaScript itself is not run by
+the test suite (no browser automation), so check it by hand once on a
+phone: log in, turn data off, save a GRN, wait over 30 minutes, turn
+data on, log in again, and confirm the GRN appears.
+
+**Production mode.** Set `PRODUCTION=True` (with `DEBUG=False`) in the
+server's `.env`; see the commented block in `.env.example`. That turns
+on HTTPS redirect, secure cookies, HSTS (one hour to start; raise
+`HSTS_SECONDS` to `31536000` after a few weeks of clean HTTPS) and
+trust of Nginx's `X-Forwarded-Proto` header. The app refuses to start
+if `PRODUCTION` and `DEBUG` are both on. HSTS "include subdomains" and
+"preload" are deliberately left off (see the comment in
+`config/settings.py`). With server-style values,
+`python manage.py check --deploy --fail-level WARNING` passes with no
+issues; `core/test_deploy_settings.py` runs exactly that.
+
+**Serving.** `gunicorn` is in `requirements.txt` and `STATIC_ROOT` is
+`staticfiles/`. On the server:
+
+```bash
+python manage.py collectstatic --noinput
+gunicorn config.wsgi:application --bind 127.0.0.1:8000 --workers 3
+```
+
+Nginx in front must serve `/static/` from `staticfiles/` and `/media/`
+from `media/`, and must set these on the proxied request (the second
+line is what makes Django trust that the visitor used HTTPS, so Nginx
+has to set it itself rather than pass on whatever the client sent):
+
+```nginx
+proxy_set_header Host $host;
+proxy_set_header X-Forwarded-Proto $scheme;
+```
+
+Full server setup (VPS, HTTPS certificate, systemd service, daily
+backup cron job) is the next step, not part of this one.
 
 ## How project access is scoped (step 2)
 
