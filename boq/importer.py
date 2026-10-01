@@ -54,6 +54,39 @@ _ALIASES = {
 }
 
 
+# Other spellings of the unit codes seen in real BOQs, keyed by
+# _unit_key() of the spelling. An exact code match is tried first.
+_UNIT_ALIASES = {
+    "m3": "m³", "cum": "m³", "cubm": "m³",
+    "m2": "m²", "sqm": "m²",
+    "lm": "m",
+    "no": "nr", "nos": "nr", "number": "nr", "each": "nr", "ea": "nr", "pcs": "nr",
+    "ls": "sum", "lumpsum": "sum",
+    "tonne": "t", "tonnes": "t", "ton": "t", "tons": "t",
+    "kgs": "kg",
+    "ltr": "L", "litre": "L", "litres": "L", "liter": "L",
+    "hrs": "hr", "hour": "hr", "hours": "hr",
+    "days": "day",
+    "hectare": "ha", "hectares": "ha",
+    "m3km": "m³·km", "m³km": "m³·km",
+    "tkm": "t·km",
+}
+
+
+def _unit_key(text):
+    """'L.S.' -> 'ls', 'm3*km' -> 'm3km', 'No.' -> 'no', 'm³·km' -> 'm³km'."""
+    return re.sub(r"[\s.*·×/-]+", "", str(text).strip().lower())
+
+
+def find_unit(raw, units_by_code):
+    """The UnitOfMeasure for a unit cell, or None if it isn't recognised."""
+    unit = units_by_code.get(str(raw).strip().lower())
+    if unit is not None:
+        return unit
+    code = _UNIT_ALIASES.get(_unit_key(raw))
+    return units_by_code.get(code.lower()) if code else None
+
+
 def _normalize(text):
     return re.sub(r"[^a-z0-9]+", " ", (text or "").strip().lower()).strip()
 
@@ -197,7 +230,7 @@ def parse_rows(path, mapping, project, boq):
                 if not unit_raw:
                     errors.append("Unit is required for a non-heading row.")
                 else:
-                    unit = units_by_code.get(str(unit_raw).lower())
+                    unit = find_unit(unit_raw, units_by_code)
                     if unit is None:
                         errors.append(f"Unit '{unit_raw}' is not in the unit-of-measure list.")
 

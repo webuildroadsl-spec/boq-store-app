@@ -1,3 +1,4 @@
+{% load boq_extras %}
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -37,8 +38,8 @@
             <td>{{ item.item_reference }}</td>
             <td>{{ item.description }}</td>
             <td>{% if item.unit %}{{ item.unit.code }}{% endif %}</td>
-            <td class="amount">{% if item.quantity is not None %}{{ item.quantity }}{% endif %}</td>
-            <td class="amount">{% if item.rate is not None %}{{ item.rate }}{% endif %}</td>
+            <td class="amount">{% if item.quantity is not None %}{{ item.quantity|qty }}{% endif %}</td>
+            <td class="amount">{% if item.rate is not None %}{{ item.rate|rate }}{% endif %}</td>
             <td class="amount">{% if item.amount is not None %}{{ item.amount }}{% endif %}</td>
         </tr>
         {% endfor %}

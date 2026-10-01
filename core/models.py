@@ -75,6 +75,9 @@ class UnitOfMeasure(models.Model):
     TYPE_COUNT = "count"
     TYPE_TIME = "time"
     TYPE_LUMP_SUM = "lump_sum"
+    # Volume or weight moved over a distance (m³·km, t·km) -- the unit
+    # road BOQs use for "extra over for haulage" items.
+    TYPE_HAULAGE = "haulage"
 
     TYPE_CHOICES = [
         (TYPE_LENGTH, "Length"),
@@ -84,6 +87,7 @@ class UnitOfMeasure(models.Model):
         (TYPE_COUNT, "Count"),
         (TYPE_TIME, "Time"),
         (TYPE_LUMP_SUM, "Lump sum"),
+        (TYPE_HAULAGE, "Haulage"),
     ]
 
     code = models.CharField(max_length=10, unique=True)

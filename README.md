@@ -28,6 +28,25 @@ Over plain `http://` on Wi-Fi the phone can't use the service worker,
 so reloading a page while offline won't work locally; the offline form
 still works as long as the page stays open. On the HTTPS server it can.
 
+## Importing a real contract BOQ
+
+Contract BOQs are laid out for printing (bill rows, "(a)"/"(i)"
+sub-items with no number, subtotal rows, formula quantities). The
+importer wants one flat row per item, so convert first:
+
+On Windows, drag the BOQ file onto `windows\4_convert_boq.bat`. Or:
+
+```
+venv\Scripts\python scripts\convert_boq_layout.py "My BOQ.xlsx"
+```
+
+It writes `My BOQ - import.xlsx` next to the original and prints each
+bill's total beside the sheet's own subtotal, plus the grand total, so
+you can see they match before importing. Unnumbered sub-items get
+references from the item above (3.21(a), 11.31(a)(i), 3.15(1)); a priced
+item with no quantity comes in with quantity 0. Then import that file
+from the project's BOQ page as usual.
+
 ## Setup (local development)
 
 1. Clone the repo and enter it.

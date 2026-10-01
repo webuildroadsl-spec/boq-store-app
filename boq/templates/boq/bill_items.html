@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% load boq_extras %}
 {% load static %}
 
 {% block title %}Bill {{ bill.number }} — {{ project.code }}{% endblock %}
@@ -37,8 +38,8 @@
             <td>{{ item.description }}</td>
             <td>{{ item.get_item_type_display }}</td>
             <td>{{ item.unit }}</td>
-            <td>{{ item.quantity|default:"" }}</td>
-            <td>{{ item.rate|default:"" }}</td>
+            <td>{{ item.quantity|qty }}</td>
+            <td>{{ item.rate|rate }}</td>
             <td>{{ item.amount|default:"" }}</td>
         </tr>
         {% endfor %}

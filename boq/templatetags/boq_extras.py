@@ -10,3 +10,17 @@ def get_item(mapping, key):
     if mapping is None:
         return None
     return mapping.get(key)
+
+
+@register.filter
+def qty(value):
+    """A BOQ quantity: at least 3 decimals, more only if it has them."""
+    from boq.numbers import quantity
+    return quantity(value)
+
+
+@register.filter
+def rate(value):
+    """A BOQ rate: at least 2 decimals, more only if it has them."""
+    from boq.numbers import rate as fmt
+    return fmt(value)
