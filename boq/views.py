@@ -19,7 +19,7 @@ from django.utils import timezone
 from core.models import Project, UnitOfMeasure
 from core.permissions import can_approve_boq, can_edit_boq, can_view_boq, user_can_access_project
 
-from . import exporter, importer
+from . import exporter, importer, numbers
 from .forms import BillForm, BOQItemForm, VariationOrderForm
 from .models import BOQ, Bill, BOQItem, VariationOrder
 
@@ -315,8 +315,8 @@ def _item_to_dict(item):
         "description": item.description,
         "item_type": item.item_type,
         "unit": item.unit_id,
-        "quantity": str(item.quantity) if item.quantity is not None else "",
-        "rate": str(item.rate) if item.rate is not None else "",
+        "quantity": numbers.quantity(item.quantity),
+        "rate": numbers.rate(item.rate),
         "amount": str(item.amount) if item.amount is not None else "",
         "section": item.section_id,
         "parent_item": item.parent_item_id,

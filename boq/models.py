@@ -254,8 +254,14 @@ class BOQItem(models.Model):
     unit = models.ForeignKey(
         UnitOfMeasure, on_delete=models.PROTECT, null=True, blank=True, related_name="+"
     )
-    quantity = models.DecimalField(max_digits=14, decimal_places=3, null=True, blank=True)
-    rate = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    # Precision follows real contract BOQs, not round numbers: quantities
+    # come from take-off formulas (2.1504 ha, 1.03125 t, 26675.706215 kg)
+    # and rates are commonly priced to 3 decimals (26.325 per m3). Storing
+    # less than that changes the amounts, so the BOQ total would no longer
+    # match the signed contract to the cent. Amounts stay at 2 decimals
+    # (Rule 1); quantities are still shown to 3 decimals on screen.
+    quantity = models.DecimalField(max_digits=18, decimal_places=6, null=True, blank=True)
+    rate = models.DecimalField(max_digits=16, decimal_places=4, null=True, blank=True)
     amount = models.DecimalField(
         max_digits=16, decimal_places=2, null=True, blank=True, editable=False
     )

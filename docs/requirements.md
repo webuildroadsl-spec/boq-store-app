@@ -70,8 +70,11 @@ built first and reused by both modules.
   chainage, end chainage (km, 3 decimals). BOQ items and store issues can
   be tagged to a section.
 - **Unit of measure** — master list: m, m², m³, km, t, kg, L, nr, item,
-  sum, day, hr. Each unit has a code, name and type (length, area,
-  volume, weight, count, time, lump sum).
+  sum, day, hr, ha, m³·km, t·km. Each unit has a code, name and type
+  (length, area, volume, weight, count, time, lump sum, haulage). BOQ
+  import also accepts common spellings (m3, m2, No., L.S., tonne, Kg,
+  m3*km). *(ha, haulage units and spellings added after importing a real
+  road BOQ, Oct 2026.)*
 - **Currency** — default Sierra Leone Leone (SLE); USD also supported
   because many road contracts are priced in dollars. Each project has one
   contract currency; store costs are recorded in the project currency.
@@ -252,8 +255,12 @@ value issued this month, top 5 materials over allowance, reorder alerts.
   the interface).
 - **Backups** — automatic daily database backup kept for 30 days, stored
   off the main server; tested restore once a month.
-- **Numbers** — quantities to 3 decimal places, money to 2; all money in
-  the project currency.
+- **Numbers** — quantities shown to at least 3 decimal places, money
+  to 2; all money in the project currency. BOQ quantities are stored to
+  6 decimals and rates to 4, because real contract BOQs price rates to
+  3 decimals and take quantities from formulas (2.1504 ha, 1.03125 t);
+  storing less changes the amounts and the BOQ no longer matches the
+  contract to the cent. *(Changed Oct 2026 after a real BOQ import.)*
 - **Language** — English interface; dates as DD/MM/YYYY.
 
 ### 7.3 Recommended tech stack
