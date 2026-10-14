@@ -181,6 +181,13 @@ def convert(ws):
         items.append(dict(row=r, bill=bill_no, title=bill_title, ref=item_ref, desc=description[:500],
                           unit=unit or unit_raw, qty=q6, rate=r4, amount=amount, sheet_amount=sheet_amount))
 
+    # A numbered reference should start with its own bill number: "5.12"
+    # sitting in Bill 7 is usually a copy-paste slip for "7.12".
+    for i in items:
+        m = re.match(r"^(?:NP\s*)?(\d+)\.", i["ref"])
+        if m and int(m.group(1)) != i["bill"]:
+            problems.append(f"Row {i['row']} ({i['ref']}): reference doesn't start with its bill number ({i['bill']}).")
+
     refs = [i["ref"] for i in items]
     for ref in {x for x in refs if refs.count(x) > 1}:
         problems.append(f"Item reference '{ref}' appears more than once; rename one before importing.")
